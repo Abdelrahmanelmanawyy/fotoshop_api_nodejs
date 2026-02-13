@@ -8,12 +8,17 @@ import { getPromptForPreset } from "./presets.js";
  */
 export async function processPhoto(orderId, photo, collectionName = "orders") {
   const { input_url, photo_id, preset, user_id } = photo;
+  const userPrompt = photo.prompt; // user's raw text from the app
 
   if (!input_url || !photo_id) {
     throw new Error(`Photo missing input_url or photo_id: ${JSON.stringify(photo)}`);
   }
 
-  const prompt = getPromptForPreset(preset || "portrait_enhance");
+  // Use the user's typed prompt if provided, otherwise fall back to preset
+  const prompt = userPrompt && userPrompt.trim()
+    ? userPrompt.trim()
+    : getPromptForPreset(preset || "portrait_enhance");
+  console.log(`[Processor] Prompt for ${photo_id}: "${prompt}"`);
 
   // 1. Run Replicate image edit
   const replicateOutputUrl = await runImageEdit({
@@ -39,6 +44,7 @@ export async function processPhoto(orderId, photo, collectionName = "orders") {
  * Process all photos in an order
  */
 export async function processOrder(orderId, collectionName = "orders") {
+  console.log(`[Processor] Fetching order ${orderId}...`);
   const order = await getOrder(orderId, collectionName);
 
   if (!order) {
@@ -46,6 +52,7 @@ export async function processOrder(orderId, collectionName = "orders") {
   }
 
   const { photos = [] } = order;
+  console.log(`[Processor] Order has ${photos.length} photo(s), starting Replicate...`);
 
   if (photos.length === 0) {
     throw new Error(`Order ${orderId} has no photos`);
@@ -55,9 +62,12 @@ export async function processOrder(orderId, collectionName = "orders") {
 
   for (const photo of photos) {
     try {
+      console.log(`[Processor] Processing ${photo.photo_id} (Replicate + Storage)...`);
       const result = await processPhoto(orderId, photo, collectionName);
+      console.log(`[Processor] ${photo.photo_id} done:`, result.output_url?.slice(0, 50) + "...");
       results.push({ success: true, ...result });
     } catch (err) {
+      console.error(`[Processor] ${photo.photo_id} failed:`, err.message);
       results.push({
         success: false,
         photo_id: photo.photo_id,
@@ -66,5 +76,6 @@ export async function processOrder(orderId, collectionName = "orders") {
     }
   }
 
+  console.log(`[Processor] Order ${orderId} finished:`, results);
   return { order_id: orderId, results };
 }

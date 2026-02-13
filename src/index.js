@@ -19,6 +19,7 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
+  console.log("[API] GET /health");
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 

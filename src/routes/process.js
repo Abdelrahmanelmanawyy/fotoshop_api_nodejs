@@ -26,12 +26,14 @@ router.use((req, res, next) => {
 router.post("/order", async (req, res) => {
   try {
     const { order_id, collection = "orders" } = req.body;
+    console.log(`[API] POST /process/order received, order_id=${order_id}`);
 
     if (!order_id) {
       return res.status(400).json({ error: "order_id is required" });
     }
 
     const result = await processOrder(order_id, collection);
+    console.log(`[API] Order ${order_id} completed:`, result.results?.length, "photos processed");
 
     res.json(result);
   } catch (err) {
@@ -51,8 +53,10 @@ router.post("/order/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
     const { collection = "orders" } = req.body;
+    console.log(`[API] POST /process/order/${orderId} received`);
 
     const result = await processOrder(orderId, collection);
+    console.log(`[API] Order ${orderId} completed:`, result.results?.length, "photos processed");
 
     res.json(result);
   } catch (err) {
