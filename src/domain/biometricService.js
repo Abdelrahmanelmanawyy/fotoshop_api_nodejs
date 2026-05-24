@@ -1,14 +1,22 @@
 import fs from "fs/promises";
 import { createBiometricProcess } from "../data/phont.js";
 
-/** Maps Flutter package keys to PhotoXBox `process_type` slugs. */
+/**
+ * Maps Flutter package keys to PhotoXBox `process_type` slugs.
+ *
+ * NOTE: `combo` (2 biometric + 4 passport) uses a best-guess composite slug.
+ * Verify that PhotoXBox actually accepts `2-biyometrik-4-vesikalik` as a single
+ * process_type; if it doesn't, this needs to be split into two upstream calls
+ * (one `4-biyometrik`, one `vesikalik`) and merged here.
+ */
 export const PACK_TO_PROCESS_TYPE = {
   standard: "4-biyometrik",
   hybrid: "vesikalik",
+  combo: "2-biyometrik-4-vesikalik",
 };
 
 /**
- * @param {string} packageKey - `standard` | `hybrid`
+ * @param {string} packageKey - `standard` | `hybrid` | `combo`
  */
 export function resolveProcessType(packageKey) {
   const key = String(packageKey || "").toLowerCase().trim();

@@ -47,7 +47,7 @@ function handleMulterUpload(req, res, next) {
 
 /**
  * POST /biometric/process
- * multipart: image (file), package (standard | hybrid)
+ * multipart: image (file), package (standard | hybrid | combo)
  */
 router.post("/process", handleMulterUpload, async (req, res) => {
   try {
@@ -64,7 +64,7 @@ router.post("/process", handleMulterUpload, async (req, res) => {
       return res.status(400).json({
         status: false,
         error: "package is required",
-        message: "Send package=standard or package=hybrid",
+        message: "Send package=standard, package=hybrid, or package=combo",
       });
     }
 
