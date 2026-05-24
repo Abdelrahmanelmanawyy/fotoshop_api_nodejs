@@ -34,3 +34,27 @@ export async function uploadImageFromUrl(imageUrl, destinationPath) {
     throw new Error(`Storage upload failed: ${msg}`);
   }
 }
+
+/**
+ * Upload raw image buffer to Firebase Storage.
+ * @param {Buffer} buffer
+ * @param {string} destinationPath
+ * @param {string} [contentType]
+ * @returns {Promise<string>} Public download URL
+ */
+export async function uploadImageFromBuffer(buffer, destinationPath, contentType = "image/jpeg") {
+  try {
+    const bucket = getStorage().bucket();
+    const file = bucket.file(destinationPath);
+
+    await file.save(buffer, {
+      metadata: { contentType },
+    });
+
+    await file.makePublic();
+    return `https://storage.googleapis.com/${bucket.name}/${destinationPath}`;
+  } catch (err) {
+    const msg = err?.message || String(err);
+    throw new Error(`Storage upload failed: ${msg}`);
+  }
+}

@@ -1,19 +1,23 @@
 {
   "name": "fotoshop-api",
   "version": "1.0.0",
-  "description": "Node.js API for image editing with Replicate flux-kontext-pro and Firestore",
+  "description": "Node.js API for image editing (Replicate google/nano-banana-2, Firestore)",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch-path=src src/index.js",
-    "test": "node --test ./test/presets.test.js ./test/validation.test.js ./test/orderService.test.js"
+    "dev": "node src/index.js",
+    "dev:watch": "node --watch-path=src src/index.js",
+    "test": "node --test ./test/presets.test.js ./test/validation.test.js ./test/orderService.test.js ./test/biometricService.test.js ./test/replicate.test.js ./test/openaiImage.test.js"
   },
   "dependencies": {
     "axios": "^1.7.7",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
     "firebase-admin": "^12.7.0",
+    "form-data": "^4.0.5",
+    "multer": "^2.1.1",
+    "openai": "^6.38.0",
     "replicate": "^0.34.1"
   }
 }

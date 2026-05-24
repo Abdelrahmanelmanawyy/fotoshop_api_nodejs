@@ -13,21 +13,24 @@ export function resolveEditPrompt(photo) {
 }
 
 /**
- * Factory: order processing with injected data-layer adapters (ports).
- * Domain orchestrates business rules; it does not import firebase/replicate/axios.
- *
  * @param {object} deps
  * @param {Function} deps.runImageEdit
+ * @param {Function} deps.runGptImageEdit
+ * @param {Function} deps.isOpenAiDirectModel
  * @param {Function} deps.uploadImageFromUrl
  * @param {Function} deps.getOrder
  * @param {Function} deps.updatePhotoOutput
  */
 export function createOrderService(deps) {
-  const { runImageEdit, uploadImageFromUrl, getOrder, updatePhotoOutput } = deps;
+  const {
+    runImageEdit,
+    runGptImageEdit,
+    isOpenAiDirectModel,
+    uploadImageFromUrl,
+    getOrder,
+    updatePhotoOutput,
+  } = deps;
 
-  /**
-   * Process a single photo through Replicate and persist to Storage + Firestore.
-   */
   async function processPhoto(orderId, photo, collectionName = "orders") {
     const { input_url, photo_id, user_id } = photo;
 
@@ -35,29 +38,38 @@ export function createOrderService(deps) {
       throw new Error(`Photo missing input_url or photo_id: ${JSON.stringify(photo)}`);
     }
 
+    const modelLabel = photo.replicate_model || "(REPLICATE_MODEL env default)";
     const prompt = resolveEditPrompt(photo);
+    console.log(`[Processor] ${photo_id} model=${modelLabel}`);
     console.log(`[Processor] Prompt for ${photo_id}: "${prompt}"`);
 
-    const replicateOutputUrl = await runImageEdit({
-      inputImageUrl: input_url,
-      prompt,
-      aspectRatio: "match_input_image",
-      outputFormat: "jpg",
-      safetyTolerance: 2,
-      promptUpsampling: false,
-    });
-
     const storagePath = `uploads/edited/${user_id}/${orderId}_${photo_id}.jpg`;
-    const outputUrl = await uploadImageFromUrl(replicateOutputUrl, storagePath);
+    let outputUrl;
+
+    if (isOpenAiDirectModel(photo.replicate_model)) {
+      console.log(`[Processor] ${photo_id} using OpenAI API gpt-image-1`);
+      outputUrl = await runGptImageEdit({
+        inputImageUrl: input_url,
+        prompt,
+        storagePath,
+      });
+    } else {
+      const replicateOutputUrl = await runImageEdit({
+        inputImageUrl: input_url,
+        prompt,
+        model: photo.replicate_model,
+        aspectRatio: "match_input_image",
+        outputFormat: "jpg",
+        safetyTolerance: 2,
+        promptUpsampling: false,
+      });
+      outputUrl = await uploadImageFromUrl(replicateOutputUrl, storagePath);
+    }
 
     await updatePhotoOutput(orderId, photo_id, outputUrl, collectionName);
-
     return { photo_id, output_url: outputUrl };
   }
 
-  /**
-   * Process all photos in an order.
-   */
   async function processOrder(orderId, collectionName = "orders") {
     console.log(`[Processor] Fetching order ${orderId}...`);
     const order = await getOrder(orderId, collectionName);
@@ -67,7 +79,7 @@ export function createOrderService(deps) {
     }
 
     const { photos = [] } = order;
-    console.log(`[Processor] Order has ${photos.length} photo(s), starting Replicate...`);
+    console.log(`[Processor] Order has ${photos.length} photo(s), starting...`);
 
     if (photos.length === 0) {
       throw new Error(`Order ${orderId} has no photos`);
@@ -77,7 +89,7 @@ export function createOrderService(deps) {
 
     for (const photo of photos) {
       try {
-        console.log(`[Processor] Processing ${photo.photo_id} (Replicate + Storage)...`);
+        console.log(`[Processor] Processing ${photo.photo_id}...`);
         const result = await processPhoto(orderId, photo, collectionName);
         console.log(
           `[Processor] ${photo.photo_id} done:`,

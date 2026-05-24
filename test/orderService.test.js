@@ -34,6 +34,10 @@ test("processOrder returns aggregated results when one photo fails", async () =>
       }
       return "https://out/replicate.jpg";
     },
+    runGptImageEdit: async () => {
+      throw new Error("should not run");
+    },
+    isOpenAiDirectModel: () => false,
     async uploadImageFromUrl() {
       calls.upload++;
       return "https://storage/out.jpg";
@@ -60,6 +64,10 @@ test("processOrder throws when order missing", async () => {
     async runImageEdit() {
       throw new Error("should not run");
     },
+    runGptImageEdit: async () => {
+      throw new Error("should not run");
+    },
+    isOpenAiDirectModel: () => false,
     async uploadImageFromUrl() {
       throw new Error("should not run");
     },
