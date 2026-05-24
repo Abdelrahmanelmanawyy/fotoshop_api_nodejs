@@ -6,7 +6,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch-path=src src/index.js"
+    "dev": "node --watch-path=src src/index.js",
+    "test": "node --test ./test/presets.test.js ./test/validation.test.js ./test/orderService.test.js"
   },
   "dependencies": {
     "axios": "^1.7.7",

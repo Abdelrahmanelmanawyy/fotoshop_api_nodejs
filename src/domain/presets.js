@@ -1,6 +1,6 @@
 /**
- * Map preset names to Replicate flux-kontext-pro prompts
- * Add more presets as needed
+ * Map preset names to Replicate flux-kontext-pro prompts.
+ * Pure domain logic — no I/O.
  */
 export const PRESET_PROMPTS = {
   portrait_enhance:

@@ -97,7 +97,17 @@ After processing, each photo gets `output_url` and `output_completed_at` added.
 | `cinematic` | Cinematic lighting |
 | `professional` | Professional headshot |
 
-Add more in `src/services/presets.js`.
+Add more in `src/domain/presets.js`.
+
+### Architecture (Section A rules)
+
+Layers: **`presentation/`** (Express routes) → **`domain/`** (business rules, injectable use cases) → **`data/`** (Firestore, Replicate, Storage). Shared validation lives in **`core/`**; wiring is in **`composition/`**. See `CURSOR.md` in this folder.
+
+### Unit tests
+
+```bash
+npm test
+```
 
 ---
 
