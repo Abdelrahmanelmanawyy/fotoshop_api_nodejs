@@ -26,6 +26,7 @@ app.get("/", (req, res) => {
 app.get("/health", async (req, res) => {
   const full = req.query.full === "1" || req.query.full === "true";
   if (!full) {
+    console.log(`[API] GET /health from ${req.headers['x-forwarded-for'] || req.socket.remoteAddress}`);
     return res.json({
       status: "ok",
       timestamp: new Date().toISOString(),
