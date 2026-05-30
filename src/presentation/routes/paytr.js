@@ -1,23 +1,22 @@
 import { Router } from 'express';
 import express from 'express';
-import { initializeFirebase, getFirestore } from '../../config/firebase.js';
+import { getSupabase } from '../../config/supabase.js';
 import { getPaytrIframeToken, verifyPaytrCallback } from '../../domain/paytrService.js';
 
 const router = Router();
 
 router.use((req, res, next) => {
   try {
-    initializeFirebase();
+    getSupabase();
     next();
   } catch (err) {
-    res.status(500).json({ error: 'Firebase initialization failed', message: err.message });
+    res.status(500).json({ error: 'Supabase initialization failed', message: err.message });
   }
 });
 
 /**
  * POST /paytr/token
  * Called by Flutter before showing the payment WebView.
- * Body: { uid, copies, paperFinish, imageUrl, boothCode }
  */
 router.post('/token', async (req, res) => {
   try {
@@ -39,19 +38,18 @@ router.post('/token', async (req, res) => {
     }
 
     const orderId = `pr${Date.now().toString(36)}${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`;
-    const db = getFirestore();
+    const supabase = getSupabase();
 
-    // Store pending transaction — Node.js callback will update this
-    await db.collection('payment_transactions').doc(orderId).set({
+    await supabase.from('payment_transactions').insert({
+      id: orderId,
       uid,
       type: 'print',
       status: 'wait',
-      amountTry: printPriceTry,
-      boothCode,
-      imageUrl,
+      amount_try: printPriceTry,
+      booth_code: boothCode,
+      image_url: imageUrl,
       copies,
-      paperFinish,
-      createdAt: new Date(),
+      paper_finish: paperFinish,
     });
 
     const clientIp =
@@ -96,60 +94,69 @@ router.post('/callback', express.urlencoded({ extended: false }), async (req, re
     }
 
     const { merchant_oid, status } = req.body;
-    const db = getFirestore();
-    const txRef = db.collection('payment_transactions').doc(merchant_oid);
-    const txSnap = await txRef.get();
+    const supabase = getSupabase();
 
-    if (!txSnap.exists) {
+    const { data: tx } = await supabase
+      .from('payment_transactions')
+      .select('*')
+      .eq('id', merchant_oid)
+      .maybeSingle();
+
+    if (!tx) {
       console.error(`[PayTR] transaction not found: ${merchant_oid}`);
       return res.send('OK');
     }
 
-    const tx = txSnap.data();
-
     if (status === 'success') {
-      // Use orderId as print job doc ID so Flutter can watch it directly
-      await db.collection('print_jobs').doc(merchant_oid).set({
-        boothCode: tx.boothCode,
+      await supabase.from('print_jobs').insert({
+        id: merchant_oid,
+        booth_code: tx.booth_code,
         status: 'pending',
-        imageUrl: tx.imageUrl,
-        userId: tx.uid,
+        image_url: tx.image_url,
+        user_id: tx.uid,
         copies: tx.copies,
-        paperFinish: tx.paperFinish,
-        isPaidByMoney: true,
-        paymentTransactionId: merchant_oid,
-        createdAt: new Date(),
+        paper_finish: tx.paper_finish,
+        is_paid_by_money: true,
       });
-      await txRef.update({ status: 'paid' });
+      await supabase
+        .from('payment_transactions')
+        .update({ status: 'paid' })
+        .eq('id', merchant_oid);
       console.log(`[PayTR] payment success → print job created: ${merchant_oid}`);
     } else {
-      await txRef.update({ status: 'unpaid' });
+      await supabase
+        .from('payment_transactions')
+        .update({ status: 'unpaid' })
+        .eq('id', merchant_oid);
       console.log(`[PayTR] payment failed: ${merchant_oid}`);
     }
 
     res.send('OK');
   } catch (err) {
     console.error('[PayTR] callback error:', err.message);
-    res.send('OK'); // always OK to PayTR
+    res.send('OK');
   }
 });
 
 /**
  * GET /paytr/status/:orderId
- * Flutter polls this to check payment status.
  */
 router.get('/status/:orderId', async (req, res) => {
   try {
-    const db = getFirestore();
-    const snap = await db.collection('payment_transactions').doc(req.params.orderId).get();
-    if (!snap.exists) return res.status(404).json({ error: 'Not found' });
-    res.json({ status: snap.data().status, orderId: req.params.orderId });
+    const supabase = getSupabase();
+    const { data } = await supabase
+      .from('payment_transactions')
+      .select('status')
+      .eq('id', req.params.orderId)
+      .maybeSingle();
+
+    if (!data) return res.status(404).json({ error: 'Not found' });
+    res.json({ status: data.status, orderId: req.params.orderId });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-/** Simple redirect targets shown in WebView after PayTR payment */
 router.get('/ok', (_, res) =>
   res.send('<html><body style="font-family:sans-serif;text-align:center;padding:40px"><h2>✅ Ödeme başarılı!</h2><p>Uygulamaya dönebilirsiniz.</p></body></html>')
 );

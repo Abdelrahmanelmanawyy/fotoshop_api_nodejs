@@ -1,13 +1,13 @@
 import { Router } from "express";
-import { initializeFirebase } from "../../config/firebase.js";
+import { getSupabase } from "../../config/supabase.js";
 import { orderService } from "../../composition/container.js";
 import { sanitizeCollectionName, sanitizeOrderId } from "../../core/validation.js";
-import * as firestore from "../../data/firestore.js";
+import * as database from "../../data/database.js";
 import { isOpenAiDirectModel, verifyOpenAiAuth } from "../../data/openaiImage.js";
 import { verifyReplicateAuth } from "../../data/replicate.js";
 
 async function verifyOrderProviders(orderId, collection) {
-  const order = await firestore.getOrder(orderId, collection);
+  const order = await database.getOrder(orderId, collection);
   if (!order) {
     return {
       ok: false,
@@ -79,10 +79,10 @@ const router = Router();
 
 router.use((req, res, next) => {
   try {
-    initializeFirebase();
+    getSupabase();
     next();
   } catch (err) {
-    res.status(500).json({ error: "Firebase initialization failed", message: err.message });
+    res.status(500).json({ error: "Supabase initialization failed", message: err.message });
   }
 });
 

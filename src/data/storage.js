@@ -1,60 +1,44 @@
 import axios from "axios";
-import { getStorage } from "../config/firebase.js";
+import { getSupabase } from "../config/supabase.js";
+
+const BUCKET = "uploads";
 
 /**
- * Upload image from URL to Firebase Storage (data boundary).
+ * Upload image from URL to Supabase Storage.
  * @param {string} imageUrl
- * @param {string} destinationPath
- * @returns {Promise<string>} Public download URL
+ * @param {string} destinationPath  e.g. "original/userId/filename.jpg"
+ * @returns {Promise<string>} Public URL
  */
 export async function uploadImageFromUrl(imageUrl, destinationPath) {
-  try {
-    const response = await axios.get(imageUrl, {
-      responseType: "arraybuffer",
-    });
-
-    const buffer = Buffer.from(response.data);
-    const contentType = response.headers["content-type"] || "image/jpeg";
-
-    const bucket = getStorage().bucket();
-    const file = bucket.file(destinationPath);
-
-    await file.save(buffer, {
-      metadata: {
-        contentType,
-      },
-    });
-
-    await file.makePublic();
-    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${destinationPath}`;
-
-    return publicUrl;
-  } catch (err) {
-    const msg = err?.message || String(err);
-    throw new Error(`Storage upload failed: ${msg}`);
-  }
+  const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
+  const buffer = Buffer.from(response.data);
+  const contentType = response.headers["content-type"] || "image/jpeg";
+  return uploadImageFromBuffer(buffer, destinationPath, contentType);
 }
 
 /**
- * Upload raw image buffer to Firebase Storage.
+ * Upload raw image buffer to Supabase Storage.
  * @param {Buffer} buffer
  * @param {string} destinationPath
  * @param {string} [contentType]
- * @returns {Promise<string>} Public download URL
+ * @returns {Promise<string>} Public URL
  */
-export async function uploadImageFromBuffer(buffer, destinationPath, contentType = "image/jpeg") {
-  try {
-    const bucket = getStorage().bucket();
-    const file = bucket.file(destinationPath);
+export async function uploadImageFromBuffer(
+  buffer,
+  destinationPath,
+  contentType = "image/jpeg"
+) {
+  const supabase = getSupabase();
 
-    await file.save(buffer, {
-      metadata: { contentType },
+  const { error } = await supabase.storage
+    .from(BUCKET)
+    .upload(destinationPath, buffer, {
+      contentType,
+      upsert: true,
     });
 
-    await file.makePublic();
-    return `https://storage.googleapis.com/${bucket.name}/${destinationPath}`;
-  } catch (err) {
-    const msg = err?.message || String(err);
-    throw new Error(`Storage upload failed: ${msg}`);
-  }
+  if (error) throw new Error(`Storage upload failed: ${error.message}`);
+
+  const { data } = supabase.storage.from(BUCKET).getPublicUrl(destinationPath);
+  return data.publicUrl;
 }

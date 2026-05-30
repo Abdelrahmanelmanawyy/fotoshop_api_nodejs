@@ -1,6 +1,7 @@
 import "./load-env.js";
 import express from "express";
 import { assertReplicateConfigured, verifyReplicateAuth } from "./data/replicate.js";
+import { getSupabase } from "./config/supabase.js";
 import biometricRoutes from "./presentation/routes/biometric.js";
 import processRoutes from "./presentation/routes/process.js";
 import paytrRoutes from "./presentation/routes/paytr.js";
@@ -50,4 +51,10 @@ app.use("/paytr", paytrRoutes);
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Fotoshop API listening on 0.0.0.0:${PORT} (use public IP:PORT from phones/other networks)`);
   void assertReplicateConfigured();
+  try {
+    getSupabase();
+    console.log("[Supabase] Client initialized OK");
+  } catch (e) {
+    console.error("[Supabase] Init failed:", e.message);
+  }
 });
