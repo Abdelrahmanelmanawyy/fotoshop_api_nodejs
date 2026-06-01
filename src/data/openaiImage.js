@@ -1,6 +1,14 @@
+import { File as NodeFile } from "node:buffer";
 import axios from "axios";
 import OpenAI, { toFile } from "openai";
 import { uploadImageFromBuffer } from "./storage.js";
+
+// The OpenAI SDK requires a global `File` for image uploads. Some Node
+// runtimes (< 20, or without the global exposed) don't define it — polyfill
+// from node:buffer so gpt-image-1 edits work regardless of Node version.
+if (!globalThis.File) {
+  globalThis.File = NodeFile;
+}
 
 const GPT_IMAGE_MODEL = "gpt-image-1";
 
