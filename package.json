@@ -8,17 +8,18 @@
     "start": "node src/index.js",
     "dev": "node src/index.js",
     "dev:watch": "node --watch-path=src src/index.js",
-    "test": "node --test ./test/presets.test.js ./test/validation.test.js ./test/orderService.test.js ./test/biometricService.test.js ./test/replicate.test.js ./test/openaiImage.test.js"
+    "test": "node --test ./test/*.test.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.4",
     "axios": "^1.7.7",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
-    "@supabase/supabase-js": "^2.49.4",
-    "ws": "^8.18.0",
     "form-data": "^4.0.5",
+    "googleapis": "^173.0.0",
     "multer": "^2.1.1",
     "openai": "^6.38.0",
-    "replicate": "^0.34.1"
+    "replicate": "^0.34.1",
+    "ws": "^8.18.0"
   }
 }

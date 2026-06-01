@@ -10,7 +10,10 @@ const BUCKET = "uploads";
  * @returns {Promise<string>} Public URL
  */
 export async function uploadImageFromUrl(imageUrl, destinationPath) {
-  const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
+  const response = await axios.get(imageUrl, {
+    responseType: "arraybuffer",
+    timeout: 30000,
+  });
   const buffer = Buffer.from(response.data);
   const contentType = response.headers["content-type"] || "image/jpeg";
   return uploadImageFromBuffer(buffer, destinationPath, contentType);

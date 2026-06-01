@@ -34,6 +34,7 @@ export async function verifyReplicateAuth() {
   try {
     const response = await fetch("https://api.replicate.com/v1/account", {
       headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10000),
     });
     if (response.ok) {
       return { ok: true };

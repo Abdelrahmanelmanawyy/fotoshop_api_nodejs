@@ -56,6 +56,7 @@ export async function getPaytrIframeToken({
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString(),
+    signal: AbortSignal.timeout(15000),
   });
 
   const data = await response.json();

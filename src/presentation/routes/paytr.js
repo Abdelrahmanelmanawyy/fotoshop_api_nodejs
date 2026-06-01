@@ -1,9 +1,12 @@
+import crypto from 'node:crypto';
 import { Router } from 'express';
 import express from 'express';
 import { getSupabase } from '../../config/supabase.js';
 import { getPaytrIframeToken, verifyPaytrCallback } from '../../domain/paytrService.js';
 
 const router = Router();
+
+const ALLOWED_PAPER_FINISHES = new Set(['glossy', 'matte', 'Glossy', 'Matte']);
 
 router.use((req, res, next) => {
   try {
@@ -26,17 +29,39 @@ router.post('/token', async (req, res) => {
       return res.status(400).json({ error: 'uid, imageUrl and boothCode are required' });
     }
 
+    // Validate copies — must be an integer in 1..100
+    const copiesInt = Number(copies);
+    if (!Number.isInteger(copiesInt) || copiesInt < 1 || copiesInt > 100) {
+      return res.status(400).json({ error: 'copies must be an integer between 1 and 100' });
+    }
+
+    // Validate paperFinish against a whitelist
+    if (!ALLOWED_PAPER_FINISHES.has(paperFinish)) {
+      return res.status(400).json({ error: 'invalid paperFinish' });
+    }
+
+    // Validate imageUrl is a well-formed https URL
+    try {
+      const parsed = new URL(imageUrl);
+      if (parsed.protocol !== 'https:') {
+        return res.status(400).json({ error: 'imageUrl must be an https URL' });
+      }
+    } catch {
+      return res.status(400).json({ error: 'imageUrl must be a valid URL' });
+    }
+
     const merchantId = process.env.PAYTR_MERCHANT_ID;
     const merchantKey = process.env.PAYTR_MERCHANT_KEY;
     const merchantSalt = process.env.PAYTR_MERCHANT_SALT;
     const testMode = process.env.PAYTR_TEST_MODE || '0';
-    const baseUrl = process.env.PAYTR_CALLBACK_URL.replace('/callback', '');
     const printPriceTry = parseFloat(process.env.PRINT_PRICE_TRY || '49.99');
 
+    // Validate credentials BEFORE using any of them (esp. PAYTR_CALLBACK_URL)
     if (!merchantId || !merchantKey || !merchantSalt || !process.env.PAYTR_CALLBACK_URL) {
       return res.status(503).json({ error: 'PayTR credentials not configured on server' });
     }
 
+    const baseUrl = process.env.PAYTR_CALLBACK_URL.replace('/callback', '');
     const orderId = `pr${Date.now().toString(36)}${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`;
     const supabase = getSupabase();
 
@@ -48,7 +73,7 @@ router.post('/token', async (req, res) => {
       amount_try: printPriceTry,
       booth_code: boothCode,
       image_url: imageUrl,
-      copies,
+      copies: copiesInt,
       paper_finish: paperFinish,
     });
 
@@ -64,7 +89,7 @@ router.post('/token', async (req, res) => {
       orderId,
       email: `${uid}@fotoshop.app`,
       amountTry: printPriceTry,
-      itemName: `Baskı ×${copies} (${paperFinish})`,
+      itemName: `Baskı ×${copiesInt} (${paperFinish})`,
       clientIp,
       merchantOkUrl: `${baseUrl}/ok`,
       merchantFailUrl: `${baseUrl}/fail`,
