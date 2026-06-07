@@ -8,6 +8,8 @@ import biometricRoutes from "./presentation/routes/biometric.js";
 import processRoutes from "./presentation/routes/process.js";
 import paytrRoutes from "./presentation/routes/paytr.js";
 import iapRoutes from "./presentation/routes/iap.js";
+import pricingRoutes from "./presentation/routes/pricing.js";
+import couponRoutes from "./presentation/routes/coupons.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -93,6 +95,8 @@ app.use("/process", processRoutes);
 app.use("/biometric", biometricRoutes);
 app.use("/paytr", paytrRoutes);
 app.use("/iap", iapRoutes);
+app.use("/pricing", pricingRoutes);
+app.use("/coupon", couponRoutes);
 
 // Global error handler — catches sync throws and rejected promises surfaced by Express.
 // eslint-disable-next-line no-unused-vars

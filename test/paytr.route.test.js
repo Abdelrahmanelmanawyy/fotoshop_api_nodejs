@@ -87,9 +87,21 @@ test("POST /paytr/token → 400 when required fields missing", async () => {
   assert.equal(res.status, 400);
 });
 
-test("POST /paytr/token → 400 when copies is out of range", async () => {
+test("POST /paytr/token → 400 when imageUrls is empty array", async () => {
   const res = await request("POST", "/paytr/token", {
-    json: { uid: "u1", imageUrl: "https://cdn.example.com/a.jpg", boothCode: "B001", copies: 999 },
+    json: { uid: "u1", imageUrls: [], boothCode: "B001" },
+  });
+  assert.equal(res.status, 400);
+});
+
+test("POST /paytr/token → 400 when imageUrls exceeds the per-order cap", async () => {
+  // MAX_PHOTOS_PER_ORDER is 10; 999 must be rejected.
+  const urls = Array.from(
+    { length: 999 },
+    (_, i) => `https://cdn.example.com/${i}.jpg`
+  );
+  const res = await request("POST", "/paytr/token", {
+    json: { uid: "u1", imageUrls: urls, boothCode: "B001" },
   });
   assert.equal(res.status, 400);
 });
@@ -101,7 +113,19 @@ test("POST /paytr/token → 400 when imageUrl is not https", async () => {
   assert.equal(res.status, 400);
 });
 
-test("POST /paytr/token → 200 happy path (regression: crypto import + env order)", async () => {
+test("POST /paytr/token → 400 when paperFinish is invalid", async () => {
+  const res = await request("POST", "/paytr/token", {
+    json: {
+      uid: "u1",
+      imageUrl: "https://cdn.example.com/a.jpg",
+      boothCode: "B001",
+      paperFinish: "shiny-rainbow",
+    },
+  });
+  assert.equal(res.status, 400);
+});
+
+test("POST /paytr/token → 200 happy path (legacy single imageUrl)", async () => {
   const restore = stubOutboundFetch();
   try {
     const res = await request("POST", "/paytr/token", {
@@ -109,7 +133,6 @@ test("POST /paytr/token → 200 happy path (regression: crypto import + env orde
         uid: "u1",
         imageUrl: "https://cdn.example.com/a.jpg",
         boothCode: "B001",
-        copies: 2,
         paperFinish: "glossy",
       },
     });
@@ -117,6 +140,49 @@ test("POST /paytr/token → 200 happy path (regression: crypto import + env orde
     const body = JSON.parse(res.body);
     assert.equal(body.token, "faketoken");
     assert.ok(body.orderId && body.orderId.startsWith("pr"));
+    // Single photo → single-sheet price.
+    assert.equal(body.priceTry, 49.99);
+  } finally {
+    restore();
+  }
+});
+
+test("POST /paytr/token → 200 multi-photo bundle uses tier price", async () => {
+  const restore = stubOutboundFetch();
+  try {
+    const res = await request("POST", "/paytr/token", {
+      json: {
+        uid: "u1",
+        imageUrls: [
+          "https://cdn.example.com/a.jpg",
+          "https://cdn.example.com/b.jpg",
+        ],
+        boothCode: "B001",
+        paperFinish: "glossy",
+      },
+    });
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.body);
+    // 2-photo bundle = ₺89.99 per the tier table, NOT 2 × 49.99.
+    assert.equal(body.priceTry, 89.99);
+  } finally {
+    restore();
+  }
+});
+
+test("POST /paytr/token → 200 normalizes 'Glossy Premium' to canonical glossy", async () => {
+  const restore = stubOutboundFetch();
+  try {
+    const res = await request("POST", "/paytr/token", {
+      json: {
+        uid: "u1",
+        imageUrl: "https://cdn.example.com/a.jpg",
+        boothCode: "B001",
+        paperFinish: "Glossy Premium",
+      },
+    });
+    // Used to be 400 — the new normalizer accepts friendly forms.
+    assert.equal(res.status, 200);
   } finally {
     restore();
   }
