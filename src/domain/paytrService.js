@@ -27,8 +27,8 @@ export async function getPaytrIframeToken({
     `${paymentAmount}${userBasket}00TL${testMode}`;
 
   const paytrToken = crypto
-    .createHmac('sha256', `${merchantKey}${merchantSalt}`)
-    .update(hashStr)
+    .createHmac('sha256', merchantKey)
+    .update(hashStr + merchantSalt)
     .digest('base64');
 
   const params = new URLSearchParams({
