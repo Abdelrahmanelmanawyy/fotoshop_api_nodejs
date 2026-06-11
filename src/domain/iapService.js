@@ -79,6 +79,7 @@ export async function verifyAndGrant({ uid, platform, productId, verificationDat
     p_delta: credits,
     p_title: 'Kredi Satın Alındı',
     p_subtitle: `${credits} kredi eklendi • ${productId}`,
+    p_type: 'purchase', // real money — distinguishes from free 'gift' credits
   });
   if (error) {
     console.error('[IAP] Supabase RPC error:', error);

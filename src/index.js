@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import express from "express";
 import { assertReplicateConfigured, verifyReplicateAuth } from "./data/replicate.js";
 import { getSupabase } from "./config/supabase.js";
+import { subscribeToPricingChanges } from "./domain/printPricingService.js";
 import biometricRoutes from "./presentation/routes/biometric.js";
 import processRoutes from "./presentation/routes/process.js";
 import paytrRoutes from "./presentation/routes/paytr.js";
@@ -126,8 +127,11 @@ if (isMain) {
       console.error("[Replicate] startup check failed:", e?.message ?? e)
     );
     try {
-      getSupabase();
+      const supabase = getSupabase();
       console.log("[Supabase] Client initialized OK");
+      // Live-invalidate the pricing cache whenever the admin dashboard saves
+      // a price change in `app_pricing` (requires the pricing realtime migration).
+      subscribeToPricingChanges(supabase);
     } catch (e) {
       console.error("[Supabase] Init failed:", e.message);
     }

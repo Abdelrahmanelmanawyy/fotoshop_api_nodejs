@@ -5,11 +5,17 @@
  * can change them at runtime without redeploying. This module keeps a short-lived
  * in-process cache (TTL_MS) so every checkout request does not hit the database.
  *
+ * Additionally, when [subscribeToPricingChanges] is invoked at boot, we hold a
+ * Supabase realtime subscription on the `app_pricing` table and call
+ * [invalidatePricingCache] the instant a row changes — so dashboard edits
+ * propagate to checkout/PayTR within milliseconds (the TTL is only the worst
+ * case if realtime drops).
+ *
  * Fallback values match the original hardcoded constants and are used when the
  * DB is unreachable (e.g. during local dev without network).
  */
 
-const TTL_MS = 5 * 60 * 1000; // 5-minute cache
+const TTL_MS = 30 * 1000; // 30-second cache — fast propagation of admin price edits
 
 /** @type {{ data: Record<string,number>, loadedAt: number } | null} */
 let _cache = null;
@@ -62,6 +68,50 @@ export async function loadPricing(supabase) {
 /** Force the next call to loadPricing() to re-fetch from the DB. */
 export function invalidatePricingCache() {
   _cache = null;
+}
+
+/** @type {ReturnType<import('@supabase/supabase-js').SupabaseClient['channel']> | null} */
+let _pricingChannel = null;
+
+/**
+ * Subscribe to realtime INSERT/UPDATE/DELETE on `app_pricing` so the in-process
+ * cache is invalidated the instant the admin dashboard saves a new price.
+ *
+ * Safe to call once at startup. Returns the channel so callers can `unsubscribe`
+ * during shutdown if they want — otherwise it lives for the process lifetime.
+ *
+ * Requires the `2026-06-11_pricing_live_updates.sql` migration to have been run
+ * (it adds `app_pricing` to the `supabase_realtime` publication).
+ *
+ * @param {import('@supabase/supabase-js').SupabaseClient} supabase
+ */
+export function subscribeToPricingChanges(supabase) {
+  if (_pricingChannel) return _pricingChannel;
+  try {
+    _pricingChannel = supabase
+      .channel('app_pricing_invalidate')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'app_pricing' },
+        (payload) => {
+          invalidatePricingCache();
+          console.log(
+            `[pricing] cache invalidated via realtime (${payload.eventType} on ${payload.new?.key ?? payload.old?.key})`,
+          );
+        },
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('[pricing] realtime subscription active (app_pricing)');
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          console.warn(`[pricing] realtime subscription ${status} — relying on ${TTL_MS / 1000}s TTL`);
+        }
+      });
+    return _pricingChannel;
+  } catch (err) {
+    console.warn('[pricing] realtime subscribe failed:', err.message);
+    return null;
+  }
 }
 
 /**
