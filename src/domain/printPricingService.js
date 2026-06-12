@@ -30,7 +30,7 @@ const DEFAULTS = Object.freeze({
 });
 
 /** Hard cap on photos per order (not stored in DB — structural limit). */
-export const MAX_PHOTOS_PER_ORDER = 10;
+export const MAX_PHOTOS_PER_ORDER = 3;
 
 /**
  * Load prices from the `app_pricing` table, using a cached copy when fresh.
