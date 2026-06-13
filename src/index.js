@@ -22,7 +22,7 @@ const PORT = process.env.PORT || 3000;
 // defaults cover the production web domain + local Flutter web dev.
 const corsAllowedOrigins = (
   process.env.CORS_ALLOWED_ORIGINS ||
-  "https://photoshopapp.com,https://www.photoshopapp.com"
+  "https://app.fotoshopapp.xyz,https://fotoshopapp.xyz,https://www.fotoshopapp.xyz"
 )
   .split(",")
   .map((o) => o.trim())
