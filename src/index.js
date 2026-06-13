@@ -11,9 +11,43 @@ import paytrRoutes from "./presentation/routes/paytr.js";
 import iapRoutes from "./presentation/routes/iap.js";
 import pricingRoutes from "./presentation/routes/pricing.js";
 import couponRoutes from "./presentation/routes/coupons.js";
+import stripeRoutes, { stripeWebhookHandler } from "./presentation/routes/stripe.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// --- CORS (web version: photoshopapp.com) ---------------------------------
+// The mobile app is a native client and ignores CORS, so this only affects the
+// browser build. Allowed origins come from CORS_ALLOWED_ORIGINS (comma-list);
+// defaults cover the production web domain + local Flutter web dev.
+const corsAllowedOrigins = (
+  process.env.CORS_ALLOWED_ORIGINS ||
+  "https://photoshopapp.com,https://www.photoshopapp.com"
+)
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && corsAllowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+// Stripe webhook needs the RAW request body for signature verification, so it
+// MUST be registered before the JSON body parser below.
+app.post(
+  "/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhookHandler
+);
 
 app.use(express.json());
 
@@ -34,6 +68,14 @@ function checkEnv() {
     if (missing.length) {
       console.warn(`[ENV] ${group}: missing ${missing.join(", ")} — related features will return errors until set.`);
     }
+  }
+
+  // Stripe (web version credit purchases)
+  if (!process.env.STRIPE_SECRET_KEY) {
+    console.warn("[ENV] Stripe: missing STRIPE_SECRET_KEY — /stripe/checkout will return errors until set.");
+  }
+  if (!process.env.STRIPE_WEBHOOK_SECRET) {
+    console.warn("[ENV] Stripe: missing STRIPE_WEBHOOK_SECRET — webhook signature verification disabled (DEV ONLY).");
   }
 
   // IAP credentials — only required when IAP_DEV_MODE is NOT set.
@@ -96,6 +138,7 @@ app.use("/process", processRoutes);
 app.use("/biometric", biometricRoutes);
 app.use("/paytr", paytrRoutes);
 app.use("/iap", iapRoutes);
+app.use("/stripe", stripeRoutes);
 app.use("/pricing", pricingRoutes);
 app.use("/coupon", couponRoutes);
 
