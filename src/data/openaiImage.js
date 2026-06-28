@@ -2,6 +2,7 @@ import { File as NodeFile } from "node:buffer";
 import axios from "axios";
 import OpenAI, { toFile } from "openai";
 import { uploadImageFromBuffer } from "./storage.js";
+import { withTimeout, openaiTimeoutMs } from "../core/timeout.js";
 
 // The OpenAI SDK requires a global `File` for image uploads. Some Node
 // runtimes (< 20, or without the global exposed) don't define it — polyfill
@@ -100,19 +101,30 @@ export async function runGptImageEdit({ inputImageUrl, prompt, storagePath }) {
   const client = getOpenAiClient();
   const size = process.env.OPENAI_IMAGE_SIZE?.trim() || "1024x1024";
 
+  const timeoutMs = openaiTimeoutMs();
   try {
-    const response = await axios.get(inputImageUrl, { responseType: "arraybuffer" });
+    const response = await axios.get(inputImageUrl, {
+      responseType: "arraybuffer",
+      timeout: 30000,
+    });
     const buffer = Buffer.from(response.data);
     const { mime, ext } = detectImageMime(buffer, response.headers["content-type"]);
 
     const imageFile = await toFile(buffer, `input.${ext}`, { type: mime });
 
-    const result = await client.images.edit({
-      model: GPT_IMAGE_MODEL,
-      image: imageFile,
-      prompt,
-      size,
-    });
+    const result = await withTimeout(
+      client.images.edit(
+        {
+          model: GPT_IMAGE_MODEL,
+          image: imageFile,
+          prompt,
+          size,
+        },
+        { timeout: timeoutMs }
+      ),
+      timeoutMs,
+      "OpenAI gpt-image-1 edit"
+    );
 
     const b64 = result.data?.[0]?.b64_json;
     if (!b64) {

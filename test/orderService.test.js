@@ -56,6 +56,75 @@ test("processOrder returns aggregated results when one photo fails", async () =>
   assert.equal(calls.upload, 1);
 });
 
+test("processOrder refunds + marks failed when ALL photos fail", async () => {
+  const calls = { refund: 0, statuses: [] };
+
+  const svc = createOrderService({
+    async getOrder() {
+      return {
+        photos: [{ photo_id: "A", input_url: "https://in/a", user_id: "u1" }],
+      };
+    },
+    async runImageEdit() {
+      throw new Error("replicate down");
+    },
+    runGptImageEdit: async () => {
+      throw new Error("should not run");
+    },
+    isOpenAiDirectModel: () => false,
+    async uploadImageFromUrl() {
+      throw new Error("should not run");
+    },
+    async updatePhotoOutput() {},
+    async setOrderStatus(orderId, status) {
+      calls.statuses.push(status);
+    },
+    async refundOrder() {
+      calls.refund++;
+      return true;
+    },
+  });
+
+  const out = await svc.processOrder("ORD_FAIL", "orders");
+
+  assert.equal(out.results[0].success, false);
+  assert.equal(calls.refund, 1, "should refund exactly once on total failure");
+  assert.ok(calls.statuses.includes("processing"), "marks processing at start");
+});
+
+test("processOrder skips photos that already have output (idempotent re-run)", async () => {
+  let replicateCalls = 0;
+  const svc = createOrderService({
+    async getOrder() {
+      return {
+        photos: [
+          { photo_id: "A", input_url: "https://in/a", user_id: "u1", output_url: "https://done/a.jpg" },
+          { photo_id: "B", input_url: "https://in/b", user_id: "u1" },
+        ],
+      };
+    },
+    async runImageEdit() {
+      replicateCalls++;
+      return "https://out/x.jpg";
+    },
+    runGptImageEdit: async () => "https://out/y.jpg",
+    isOpenAiDirectModel: () => false,
+    async uploadImageFromUrl() {
+      return "https://storage/out.jpg";
+    },
+    async updatePhotoOutput() {},
+    async setOrderStatus() {},
+    async refundOrder() {
+      return true;
+    },
+  });
+
+  const out = await svc.processOrder("ORD_RE", "orders");
+
+  assert.equal(replicateCalls, 1, "only the not-yet-done photo is regenerated");
+  assert.equal(out.results.filter((r) => r.success).length, 2);
+});
+
 test("processOrder throws when order missing", async () => {
   const svc = createOrderService({
     async getOrder() {

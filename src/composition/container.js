@@ -7,6 +7,8 @@ import { createOrderService } from "../domain/orderService.js";
 export const orderService = createOrderService({
   getOrder: database.getOrder,
   updatePhotoOutput: database.updatePhotoOutput,
+  setOrderStatus: database.setOrderStatus,
+  refundOrder: database.refundOrder,
   runImageEdit: replicate.runImageEdit,
   runGptImageEdit,
   isOpenAiDirectModel,

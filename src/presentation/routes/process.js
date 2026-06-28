@@ -5,6 +5,7 @@ import { sanitizeCollectionName, sanitizeOrderId } from "../../core/validation.j
 import * as database from "../../data/database.js";
 import { isOpenAiDirectModel, verifyOpenAiAuth } from "../../data/openaiImage.js";
 import { verifyReplicateAuth } from "../../data/replicate.js";
+import { recordSpend } from "../../domain/spendGuard.js";
 
 async function verifyOrderProviders(orderId, collection) {
   const order = await database.getOrder(orderId, collection);
@@ -47,6 +48,17 @@ async function verifyOrderProviders(orderId, collection) {
     }
   }
 
+  return { ok: true, order };
+}
+
+/**
+ * Enforce that the authenticated caller owns the order. In soft auth mode
+ * (no req.user) this is a no-op; once REQUIRE_AUTH=1 it blocks A-triggers-B.
+ */
+function checkOwnership(order, req) {
+  if (req.user && order?.user_id && order.user_id !== req.user.id) {
+    return { ok: false, status: 403, error: "forbidden", message: "Not your order" };
+  }
   return { ok: true };
 }
 
@@ -111,6 +123,12 @@ router.post("/order", async (req, res) => {
       });
     }
 
+    const owns = checkOwnership(providers.order, req);
+    if (!owns.ok) {
+      return res.status(owns.status).json({ error: owns.error, message: owns.message });
+    }
+
+    recordSpend((providers.order.photos ?? []).length || 1);
     const result = await orderService.processOrder(orderId, collection);
     return respondWithOrderResult(res, orderId, result);
   } catch (err) {
@@ -146,6 +164,12 @@ router.post("/order/:orderId", async (req, res) => {
       });
     }
 
+    const owns = checkOwnership(providers.order, req);
+    if (!owns.ok) {
+      return res.status(owns.status).json({ error: owns.error, message: owns.message });
+    }
+
+    recordSpend((providers.order.photos ?? []).length || 1);
     const result = await orderService.processOrder(orderId, collection);
     return respondWithOrderResult(res, orderId, result);
   } catch (err) {

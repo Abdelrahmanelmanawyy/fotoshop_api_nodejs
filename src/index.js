@@ -12,6 +12,14 @@ import iapRoutes from "./presentation/routes/iap.js";
 import pricingRoutes from "./presentation/routes/pricing.js";
 import couponRoutes from "./presentation/routes/coupons.js";
 import stripeRoutes, { stripeWebhookHandler } from "./presentation/routes/stripe.js";
+import { authenticate } from "./presentation/middleware/auth.js";
+import {
+  aiRateLimiter,
+  aiDailyRateLimiter,
+  generalRateLimiter,
+} from "./presentation/middleware/rateLimit.js";
+import { spendCapGuard } from "./domain/spendGuard.js";
+import { startOrderSweeper } from "./domain/orderSweeper.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -134,13 +142,22 @@ app.get("/health", async (req, res) => {
   });
 });
 
-app.use("/process", processRoutes);
-app.use("/biometric", biometricRoutes);
+// Cost-incurring routes: authenticate (soft until REQUIRE_AUTH=1), then rate-limit
+// per user, then enforce the global spend circuit breaker.
+app.use("/process", authenticate, aiRateLimiter, aiDailyRateLimiter, spendCapGuard, processRoutes);
+app.use("/biometric", authenticate, aiRateLimiter, aiDailyRateLimiter, spendCapGuard, biometricRoutes);
+
+// PayTR/Stripe webhooks are provider-to-server callbacks (signature-verified
+// inside the route) — no user JWT, no rate limit.
 app.use("/paytr", paytrRoutes);
-app.use("/iap", iapRoutes);
 app.use("/stripe", stripeRoutes);
+
+// Authenticated user actions — coarse rate limit, no spend guard.
+app.use("/iap", authenticate, generalRateLimiter, iapRoutes);
+app.use("/coupon", authenticate, generalRateLimiter, couponRoutes);
+
+// Public read-only.
 app.use("/pricing", pricingRoutes);
-app.use("/coupon", couponRoutes);
 
 // Global error handler — catches sync throws and rejected promises surfaced by Express.
 // eslint-disable-next-line no-unused-vars
@@ -175,6 +192,11 @@ if (isMain) {
       // Live-invalidate the pricing cache whenever the admin dashboard saves
       // a price change in `app_pricing` (requires the pricing realtime migration).
       subscribeToPricingChanges(supabase);
+      // Reconcile zombie/stuck AI orders (refund or re-process). Safe to run on
+      // a single instance; gate behind a leader election when scaling out.
+      if (process.env.DISABLE_ORDER_SWEEPER !== "1") {
+        startOrderSweeper();
+      }
     } catch (e) {
       console.error("[Supabase] Init failed:", e.message);
     }

@@ -1,4 +1,5 @@
 import Replicate from "replicate";
+import { withTimeout, replicateTimeoutMs } from "../core/timeout.js";
 
 function getReplicateToken() {
   return (process.env.REPLICATE_API_TOKEN ?? "")
@@ -184,7 +185,11 @@ export async function runImageEdit({
   }
 
   try {
-    const output = await createReplicateClient().run(model, { input });
+    const output = await withTimeout(
+      createReplicateClient().run(model, { input }),
+      replicateTimeoutMs(),
+      `Replicate ${model}`
+    );
     return outputToUrl(output);
   } catch (err) {
     const msg = err?.message || String(err);
