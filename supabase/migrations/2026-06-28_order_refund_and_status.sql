@@ -90,9 +90,17 @@ GRANT EXECUTE ON FUNCTION public.spend_credits(uuid, integer, text, text)
   TO authenticated, service_role;
 
 -- 4. Idempotent refund ────────────────────────────────────────────────────────
--- Refunds the credits recorded on an order exactly once. The order row is locked
--- FOR UPDATE and refunded_at gates re-entry, so retries / duplicate sweeps are safe.
--- service_role ONLY — the backend is the refund authority, never the client.
+-- Refunds the credits ACTUALLY spent on an order, exactly once. The order row is
+-- locked FOR UPDATE and refunded_at gates re-entry, so retries / duplicate sweeps
+-- are safe. service_role ONLY — the backend is the refund authority, never the
+-- client.
+--
+-- SECURITY: the refund amount is derived from the server-recorded spend ledger
+-- (the wallet_transactions 'spend' row that spend_credits wrote, keyed by the
+-- order id), NOT from orders.credits_spent — because a client can write any value
+-- into credits_spent when it inserts its own order (RLS only checks user_id).
+-- Trusting that column would let a tampered client mint credits by inserting a
+-- huge credits_spent and forcing a failure. The ledger is the source of truth.
 CREATE OR REPLACE FUNCTION public.refund_order_credits(p_order_id text)
 RETURNS void
 LANGUAGE plpgsql
@@ -101,11 +109,11 @@ SET search_path = public
 AS $$
 DECLARE
   v_uid      uuid;
-  v_amount   integer;
   v_refunded timestamptz;
+  v_spent    integer;
 BEGIN
-  SELECT user_id, credits_spent, refunded_at
-    INTO v_uid, v_amount, v_refunded
+  SELECT user_id, refunded_at
+    INTO v_uid, v_refunded
     FROM public.orders
     WHERE id = p_order_id
     FOR UPDATE;
@@ -114,20 +122,36 @@ BEGIN
     RAISE EXCEPTION 'order_not_found';
   END IF;
 
-  -- Already refunded, or nothing was charged → no-op.
-  IF v_refunded IS NOT NULL OR v_amount IS NULL OR v_amount <= 0 THEN
+  -- Already refunded → no-op (idempotent).
+  IF v_refunded IS NOT NULL THEN
+    RETURN;
+  END IF;
+
+  -- Authoritative amount = what spend_credits actually deducted for this order
+  -- (idempotency_key = order id, set by the 4-arg overload). Never trust the
+  -- client-written orders.credits_spent.
+  SELECT COALESCE(SUM(-delta), 0)
+    INTO v_spent
+    FROM public.wallet_transactions
+    WHERE idempotency_key = p_order_id AND type = 'spend';
+
+  IF v_spent <= 0 THEN
+    -- Nothing verifiably spent (e.g. legacy/biometric order without a keyed
+    -- spend) → just mark refunded, don't credit anything.
     UPDATE public.orders
-      SET status = 'refunded', updated_at = now()
-      WHERE id = p_order_id AND refunded_at IS NOT NULL;
+      SET status = 'refunded', refunded_at = now(), updated_at = now()
+      WHERE id = p_order_id;
     RETURN;
   END IF;
 
   UPDATE public.wallets
-    SET credits = credits + v_amount, updated_at = now()
+    SET credits = credits + v_spent, updated_at = now()
     WHERE id = v_uid;
 
+  -- Refund rows leave idempotency_key NULL (the unique index is global); refund
+  -- idempotency is guaranteed by the FOR UPDATE lock + refunded_at above.
   INSERT INTO public.wallet_transactions(wallet_id, type, title, delta)
-    VALUES (v_uid, 'refund', 'AI order refund • ' || p_order_id, v_amount);
+    VALUES (v_uid, 'refund', 'AI order refund • ' || p_order_id, v_spent);
 
   UPDATE public.orders
     SET status = 'refunded', refunded_at = now(), updated_at = now()
