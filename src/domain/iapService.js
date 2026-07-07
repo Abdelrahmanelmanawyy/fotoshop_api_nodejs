@@ -74,6 +74,29 @@ export async function verifyAndGrant({ uid, platform, productId, verificationDat
   }
 
   const supabase = getSupabase();
+
+  // Replay protection (PRODUCTION_READINESS_PLAN §2.5): a re-sent receipt for
+  // an already-granted store transaction must not double-grant. Same
+  // payment_transactions PK dedupe the Stripe webhook uses; the store's
+  // transaction id is globally unique per purchase.
+  const dedupeId = `iap_${platform}_${externalRef}`;
+  const { error: dedupeError } = await supabase.from('payment_transactions').insert({
+    id: dedupeId,
+    uid,
+    type: 'iap',
+    status: 'paid',
+    amount_try: null,
+  });
+  if (dedupeError) {
+    if (dedupeError.code === '23505') {
+      console.log(`[IAP] ${dedupeId} already granted — replay ignored`);
+      // Idempotent success: the purchase was already credited.
+      return { ok: true, credits, externalRef, replayed: true };
+    }
+    console.error('[IAP] failed to record payment_transaction:', dedupeError);
+    return { ok: false, status: 500, error: 'grant_failed' };
+  }
+
   const { error } = await supabase.rpc('add_wallet_credits', {
     p_uid: uid,
     p_delta: credits,
@@ -82,6 +105,8 @@ export async function verifyAndGrant({ uid, platform, productId, verificationDat
     p_type: 'purchase', // real money — distinguishes from free 'gift' credits
   });
   if (error) {
+    // Release the dedupe row so the client's retry can grant cleanly.
+    await supabase.from('payment_transactions').delete().eq('id', dedupeId);
     console.error('[IAP] Supabase RPC error:', error);
     return { ok: false, status: 500, error: 'grant_failed' };
   }

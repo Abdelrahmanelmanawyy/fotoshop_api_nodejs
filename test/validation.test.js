@@ -14,8 +14,12 @@ test("sanitizeOrderId rejects empty or invalid", () => {
   assert.equal(sanitizeOrderId("../../etc/passwd"), null);
 });
 
-test("sanitizeCollectionName defaults and validates", () => {
+test("sanitizeCollectionName allows only whitelisted tables", () => {
   assert.equal(sanitizeCollectionName(undefined), "orders");
-  assert.equal(sanitizeCollectionName("my_orders"), "my_orders");
+  assert.equal(sanitizeCollectionName("orders"), "orders");
+  // Not on the allowlist → falls back to the default table, never an
+  // attacker-chosen one (the value is used as the table the service-role
+  // client queries).
+  assert.equal(sanitizeCollectionName("my_orders"), "orders");
   assert.equal(sanitizeCollectionName("bad;drop"), "orders");
 });

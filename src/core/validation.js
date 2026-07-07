@@ -16,6 +16,11 @@ export function sanitizeOrderId(value) {
   return s;
 }
 
+// The collection name ends up as the table queried by the service-role client,
+// so it must be a strict allowlist, not just a character check — otherwise a
+// caller could point processing at arbitrary tables (PLAN §2.3).
+const ALLOWED_COLLECTIONS = new Set(["orders"]);
+
 /**
  * @param {unknown} value
  * @returns {string}
@@ -23,6 +28,6 @@ export function sanitizeOrderId(value) {
 export function sanitizeCollectionName(value) {
   if (value === undefined || value === null) return "orders";
   const s = String(value).trim();
-  if (!s || !/^[a-zA-Z0-9_-]{1,64}$/.test(s)) return "orders";
+  if (!ALLOWED_COLLECTIONS.has(s)) return "orders";
   return s;
 }

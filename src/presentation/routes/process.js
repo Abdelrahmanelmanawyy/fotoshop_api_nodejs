@@ -62,29 +62,26 @@ function checkOwnership(order, req) {
   return { ok: true };
 }
 
-function summarizeOrderResults(result) {
-  const results = result.results ?? [];
-  const succeeded = results.filter((r) => r.success).length;
-  const failed = results.length - succeeded;
-  return { results, succeeded, failed, total: results.length };
-}
-
-async function respondWithOrderResult(res, orderId, result) {
-  const { succeeded, failed, total } = summarizeOrderResults(result);
-
-  if (succeeded === 0 && total > 0) {
-    const firstError = result.results.find((r) => !r.success)?.error ?? "All photos failed";
-    console.error(`[API] Order ${orderId} failed: 0/${total} photos succeeded`);
-    return res.status(502).json({
-      error: "order_processing_failed",
-      message: firstError,
-      order_id: orderId,
-      ...result,
-    });
-  }
-
-  console.log(`[API] Order ${orderId} completed: ${succeeded}/${total} photos succeeded`);
-  return res.json(result);
+/**
+ * Kick off processing WITHOUT holding the HTTP request open (PLAN §5.2).
+ * Generation takes seconds-to-minutes; keeping the socket open that long
+ * caused proxy 502s and tied up the HTTP tier. The client never reads this
+ * response anyway — it watches the order row via Supabase realtime, and the
+ * sweeper re-processes/refunds if this process dies mid-job.
+ */
+function processInBackground(orderId, collection) {
+  orderService.processOrder(orderId, collection).then(
+    (result) => {
+      const results = result.results ?? [];
+      const succeeded = results.filter((r) => r.success).length;
+      console.log(`[API] Order ${orderId} finished (async): ${succeeded}/${results.length} ok`);
+    },
+    (err) => {
+      // processOrder already refunds/updates status on internal failures; this
+      // catches fetch-order errors etc. The sweeper is the safety net.
+      console.error(`[API] Async processing error for ${orderId}:`, err?.message ?? err);
+    }
+  );
 }
 
 const router = Router();
@@ -129,8 +126,8 @@ router.post("/order", async (req, res) => {
     }
 
     recordSpend((providers.order.photos ?? []).length || 1);
-    const result = await orderService.processOrder(orderId, collection);
-    return respondWithOrderResult(res, orderId, result);
+    processInBackground(orderId, collection);
+    return res.status(202).json({ accepted: true, order_id: orderId });
   } catch (err) {
     console.error("Process order error:", err);
     res.status(500).json({
@@ -170,8 +167,8 @@ router.post("/order/:orderId", async (req, res) => {
     }
 
     recordSpend((providers.order.photos ?? []).length || 1);
-    const result = await orderService.processOrder(orderId, collection);
-    return respondWithOrderResult(res, orderId, result);
+    processInBackground(orderId, collection);
+    return res.status(202).json({ accepted: true, order_id: orderId });
   } catch (err) {
     console.error("Process order error:", err);
     res.status(500).json({

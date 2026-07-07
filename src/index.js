@@ -36,6 +36,17 @@ const corsAllowedOrigins = (
   .map((o) => o.trim())
   .filter(Boolean);
 
+// Baseline security headers (PRODUCTION_READINESS_PLAN §2.3) — the API serves
+// JSON only, so a strict no-sniff/no-frame/no-referrer posture is safe. Kept
+// dependency-free (no helmet) to match the zero-new-deps constraint.
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin"); // images fetched by app/web
+  next();
+});
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && corsAllowedOrigins.includes(origin)) {
@@ -57,7 +68,9 @@ app.post(
   stripeWebhookHandler
 );
 
-app.use(express.json());
+// JSON bodies are tiny (order ids, receipt payloads). IAP receipts are the
+// largest legitimate payload; 1 MB is generous headroom while blocking abuse.
+app.use(express.json({ limit: "1mb" }));
 
 /** Warn (don't crash) if important env vars are missing at startup. */
 function checkEnv() {
@@ -180,7 +193,8 @@ export { app };
 // Only start the server when run directly (not when imported by tests).
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
 if (isMain) {
-  app.listen(PORT, "0.0.0.0", () => {
+  let stopSweeper = null;
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Fotoshop API listening on 0.0.0.0:${PORT} (use public IP:PORT from phones/other networks)`);
     checkEnv();
     assertReplicateConfigured().catch((e) =>
@@ -195,10 +209,23 @@ if (isMain) {
       // Reconcile zombie/stuck AI orders (refund or re-process). Safe to run on
       // a single instance; gate behind a leader election when scaling out.
       if (process.env.DISABLE_ORDER_SWEEPER !== "1") {
-        startOrderSweeper();
+        stopSweeper = startOrderSweeper();
       }
     } catch (e) {
       console.error("[Supabase] Init failed:", e.message);
     }
   });
+
+  // Graceful shutdown (PRODUCTION_READINESS_PLAN §6): on PM2 restart/deploy,
+  // stop taking connections and let in-flight requests finish. Interrupted
+  // generations are safe — the sweeper re-processes or refunds them on the
+  // next boot. Hard-exit after 10s so a stuck socket can't block the deploy.
+  const shutdown = (signal) => {
+    console.log(`[Process] ${signal} received — shutting down gracefully`);
+    if (stopSweeper) stopSweeper();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 10_000).unref();
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }

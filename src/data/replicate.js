@@ -70,6 +70,29 @@ export async function assertReplicateConfigured() {
 /** Default: google/nano-banana-2. Override with e.g. black-forest-labs/flux-kontext-pro */
 const DEFAULT_MODEL = "google/nano-banana-2";
 
+// Server-side model whitelist (PRODUCTION_READINESS_PLAN §2.3). The client
+// stores photos[].replicate_model and the server runs it — without this list a
+// tampered client could pay the cheap-model price and run any expensive model.
+// Must cover every id in the Flutter ReplicateModelOption enum. Extend via
+// ALLOWED_REPLICATE_MODELS (comma-separated) without a redeploy of this file.
+const BUILTIN_ALLOWED_MODELS = new Set([
+  "google/nano-banana-2",
+  "google/nano-banana",
+  "black-forest-labs/flux-kontext-pro",
+  "openai/gpt-image-2",
+]);
+
+export function isAllowedReplicateModel(model) {
+  const m = String(model || "").trim();
+  if (!m) return true; // empty → server's own env default is used
+  if (BUILTIN_ALLOWED_MODELS.has(m)) return true;
+  const extra = (process.env.ALLOWED_REPLICATE_MODELS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return extra.includes(m);
+}
+
 function modelId() {
   return process.env.REPLICATE_MODEL?.trim() || DEFAULT_MODEL;
 }
@@ -144,6 +167,10 @@ export async function runImageEdit({
   promptUpsampling = false,
 }) {
   const trimmed = modelOverride && String(modelOverride).trim();
+  if (!isAllowedReplicateModel(trimmed)) {
+    // Rejected before any Replicate spend; the photo fails → order refunds.
+    throw new Error(`model_not_allowed: ${trimmed}`);
+  }
   const model = isGptImageReplicateModel(trimmed)
     ? "openai/gpt-image-2"
     : trimmed || modelId();
