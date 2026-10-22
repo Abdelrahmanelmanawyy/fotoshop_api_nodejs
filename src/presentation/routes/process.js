@@ -1,11 +1,12 @@
 import { Router } from "express";
-import { getSupabase } from "../../config/supabase.js";
 import { orderService } from "../../composition/container.js";
 import { sanitizeCollectionName, sanitizeOrderId } from "../../core/validation.js";
 import * as database from "../../data/database.js";
 import { isOpenAiDirectModel, verifyOpenAiAuth } from "../../data/openaiImage.js";
 import { verifyReplicateAuth } from "../../data/replicate.js";
 import { recordSpend } from "../../domain/spendGuard.js";
+
+const TERMINAL_STATUSES = new Set(["completed", "refunded"]);
 
 async function verifyOrderProviders(orderId, collection) {
   const order = await database.getOrder(orderId, collection);
@@ -72,6 +73,10 @@ function checkOwnership(order, req) {
 function processInBackground(orderId, collection) {
   orderService.processOrder(orderId, collection).then(
     (result) => {
+      if (result.skipped) {
+        console.log(`[API] Order ${orderId} not processed (async): ${result.skipped}`);
+        return;
+      }
       const results = result.results ?? [];
       const succeeded = results.filter((r) => r.success).length;
       console.log(`[API] Order ${orderId} finished (async): ${succeeded}/${results.length} ok`);
@@ -84,24 +89,14 @@ function processInBackground(orderId, collection) {
   );
 }
 
-const router = Router();
-
-router.use((req, res, next) => {
-  try {
-    getSupabase();
-    next();
-  } catch (err) {
-    res.status(500).json({ error: "Supabase initialization failed", message: err.message });
-  }
-});
-
 /**
- * POST /process/order
- * Body: { order_id, collection?: "orders" }
+ * Shared handler for both route shapes. Cheap checks run here so the caller gets
+ * a meaningful status; processOrder repeats the payment check and does the atomic
+ * claim, so racing triggers still cannot double-process.
  */
-router.post("/order", async (req, res) => {
+async function acceptOrder(req, res, rawOrderId) {
   try {
-    const orderId = sanitizeOrderId(req.body?.order_id);
+    const orderId = sanitizeOrderId(rawOrderId);
     const collection = sanitizeCollectionName(req.body?.collection);
     console.log(`[API] POST /process/order received, order_id=${orderId}`);
 
@@ -119,63 +114,36 @@ router.post("/order", async (req, res) => {
         message: providers.message,
       });
     }
+    const { order } = providers;
 
-    const owns = checkOwnership(providers.order, req);
+    const owns = checkOwnership(order, req);
     if (!owns.ok) {
       return res.status(owns.status).json({ error: owns.error, message: owns.message });
     }
 
-    recordSpend((providers.order.photos ?? []).length || 1);
+    if (TERMINAL_STATUSES.has(order.status)) {
+      return res.status(409).json({ error: "order_already_finished", status: order.status });
+    }
+
+    if (!(await database.isOrderPaid(orderId))) {
+      return res.status(402).json({ error: "order_not_paid" });
+    }
+
+    recordSpend((order.photos ?? []).length || 1);
     processInBackground(orderId, collection);
     return res.status(202).json({ accepted: true, order_id: orderId });
   } catch (err) {
-    console.error("Process order error:", err);
-    res.status(500).json({
-      error: "Failed to process order",
-      message: err.message,
-    });
+    console.error("[API] Process order error:", err);
+    return res.status(500).json({ error: "process_order_failed" });
   }
-});
+}
 
-/**
- * POST /process/order/:orderId
- */
-router.post("/order/:orderId", async (req, res) => {
-  try {
-    const orderId = sanitizeOrderId(req.params?.orderId);
-    const collection = sanitizeCollectionName(req.body?.collection);
-    console.log(`[API] POST /process/order/${orderId} received`);
+const router = Router();
 
-    if (!orderId) {
-      return res.status(400).json({
-        error: "Invalid orderId",
-        message: "orderId must match allowed pattern",
-      });
-    }
+/** POST /process/order — Body: { order_id, collection?: "orders" } */
+router.post("/order", (req, res) => acceptOrder(req, res, req.body?.order_id));
 
-    const providers = await verifyOrderProviders(orderId, collection);
-    if (!providers.ok) {
-      return res.status(providers.status).json({
-        error: providers.error,
-        message: providers.message,
-      });
-    }
-
-    const owns = checkOwnership(providers.order, req);
-    if (!owns.ok) {
-      return res.status(owns.status).json({ error: owns.error, message: owns.message });
-    }
-
-    recordSpend((providers.order.photos ?? []).length || 1);
-    processInBackground(orderId, collection);
-    return res.status(202).json({ accepted: true, order_id: orderId });
-  } catch (err) {
-    console.error("Process order error:", err);
-    res.status(500).json({
-      error: "Failed to process order",
-      message: err.message,
-    });
-  }
-});
+/** POST /process/order/:orderId */
+router.post("/order/:orderId", (req, res) => acceptOrder(req, res, req.params?.orderId));
 
 export default router;

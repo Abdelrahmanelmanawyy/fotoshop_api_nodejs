@@ -1,5 +1,6 @@
 import * as database from "../data/database.js";
 import { orderService } from "../composition/container.js";
+import { PROCESSING_STALE_MS } from "./orderTiming.js";
 
 /**
  * Reconciliation sweeper — the safety net for the client's fire-and-forget
@@ -22,7 +23,7 @@ function envInt(name, fallback) {
 
 const INTERVAL_MS = envInt("SWEEP_INTERVAL_MS", 90 * 1000); // every 90s
 const PENDING_GRACE_MS = envInt("SWEEP_PENDING_GRACE_MS", 2 * 60 * 1000); // 2 min
-const PROCESSING_GRACE_MS = envInt("SWEEP_PROCESSING_GRACE_MS", 12 * 60 * 1000); // 12 min
+const PROCESSING_GRACE_MS = PROCESSING_STALE_MS; // no heartbeat for this long ⇒ worker is gone
 const HARD_AGE_MS = envInt("SWEEP_HARD_AGE_MS", 15 * 60 * 1000); // give up & refund after 15 min
 const MAX_ATTEMPTS = envInt("SWEEP_MAX_ATTEMPTS", 3);
 const BATCH = envInt("SWEEP_BATCH", 20);

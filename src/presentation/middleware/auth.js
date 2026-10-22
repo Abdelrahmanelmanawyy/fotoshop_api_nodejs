@@ -57,6 +57,29 @@ export async function authenticate(req, res, next) {
 }
 
 /**
+ * Resolve which user a request acts for. The JWT identity always wins; a `uid`
+ * in the body is only accepted while auth is soft and no token was sent (older
+ * app builds), and must match the token when both are present.
+ *
+ * @returns {{ ok: true, uid: string } | { ok: false, status: number, error: string }}
+ */
+export function resolveUserId(req, bodyUid) {
+  if (req.user) {
+    if (bodyUid && bodyUid !== req.user.id) {
+      return { ok: false, status: 403, error: "uid_mismatch" };
+    }
+    return { ok: true, uid: req.user.id };
+  }
+  if (authRequired()) {
+    return { ok: false, status: 401, error: "unauthorized" };
+  }
+  if (typeof bodyUid !== "string" || !bodyUid.trim()) {
+    return { ok: false, status: 400, error: "uid is required" };
+  }
+  return { ok: true, uid: bodyUid.trim() };
+}
+
+/**
  * Ownership guard factory: ensures the authenticated user owns the resource.
  * `resolveOwnerId(req)` returns the resource's owner uid (may be async).
  * In soft mode with no req.user, the check is skipped (paired with authenticate).
@@ -77,7 +100,8 @@ export function requireOwnership(resolveOwnerId) {
       }
       return next();
     } catch (err) {
-      return res.status(500).json({ error: "ownership_check_failed", message: err.message });
+      console.error(`[Auth] Ownership check failed on ${req.originalUrl}: ${err.message}`);
+      return res.status(500).json({ error: "ownership_check_failed" });
     }
   };
 }

@@ -4,71 +4,20 @@ import express from 'express';
 import { getSupabase } from '../../config/supabase.js';
 import { getPaytrIframeToken, verifyPaytrCallback } from '../../domain/paytrService.js';
 import {
-  MAX_PHOTOS_PER_ORDER,
   bundlePriceForPhotos,
   normalizePaperFinish,
   loadPricing,
 } from '../../domain/printPricingService.js';
+import { parseImageUrls } from '../../core/imageUrls.js';
 import {
   validateCouponCode,
   applyCoupon,
   incrementCouponUsage,
 } from '../../domain/couponService.js';
+import { authenticate, resolveUserId } from '../middleware/auth.js';
+import { generalRateLimiter } from '../middleware/rateLimit.js';
 
 const router = Router();
-
-router.use((req, res, next) => {
-  try {
-    getSupabase();
-    next();
-  } catch (err) {
-    res
-      .status(500)
-      .json({ error: 'Supabase initialization failed', message: err.message });
-  }
-});
-
-/**
- * Validate the incoming image URL(s). Accepts either:
- *   - `imageUrls`: string[] (preferred — multi-photo bundles)
- *   - `imageUrl`:  string   (legacy — single photo)
- * Returns { imageUrls } as a normalized array, or { error } on failure.
- *
- * @param {{ imageUrl?: unknown, imageUrls?: unknown }} body
- */
-function parseImageUrls(body) {
-  let raw;
-  if (Array.isArray(body.imageUrls)) {
-    raw = body.imageUrls;
-  } else if (typeof body.imageUrl === 'string') {
-    raw = [body.imageUrl];
-  } else {
-    return { error: 'imageUrl or imageUrls is required' };
-  }
-
-  if (raw.length === 0) {
-    return { error: 'imageUrls cannot be empty' };
-  }
-  if (raw.length > MAX_PHOTOS_PER_ORDER) {
-    return { error: `at most ${MAX_PHOTOS_PER_ORDER} photos per order` };
-  }
-
-  for (const url of raw) {
-    if (typeof url !== 'string') {
-      return { error: 'each image URL must be a string' };
-    }
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol !== 'https:') {
-        return { error: 'image URLs must use https' };
-      }
-    } catch {
-      return { error: 'invalid image URL' };
-    }
-  }
-
-  return { imageUrls: raw };
-}
 
 /**
  * POST /paytr/token
@@ -78,14 +27,16 @@ function parseImageUrls(body) {
  * server uses the tier table in `printPricingService.js` so the same code path
  * the Flutter UI previews against is what the customer actually pays.
  */
-router.post('/token', async (req, res) => {
+router.post('/token', authenticate, generalRateLimiter, async (req, res) => {
   try {
-    const { uid, paperFinish = 'glossy', boothCode, couponCode } = req.body;
+    const { paperFinish = 'glossy', boothCode, couponCode } = req.body;
 
-    if (!uid || !boothCode) {
-      return res
-        .status(400)
-        .json({ error: 'uid and boothCode are required' });
+    const who = resolveUserId(req, req.body.uid);
+    if (!who.ok) return res.status(who.status).json({ error: who.error });
+    const uid = who.uid;
+
+    if (!boothCode) {
+      return res.status(400).json({ error: 'boothCode is required' });
     }
 
     const { imageUrls, error: urlsError } = parseImageUrls(req.body);
@@ -104,24 +55,24 @@ router.post('/token', async (req, res) => {
     let amountTry = bundlePriceForPhotos(photoCount, pricing);
 
     // --- Coupon handling ---
+    // Usage is counted in the callback once the payment succeeds, so abandoned
+    // checkouts do not burn a limited coupon.
     let couponId = null;
     let discountTry = 0;
 
     if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
       const couponResult = await validateCouponCode(supabase, couponCode);
-      if (!couponResult.error) {
-        const applied = applyCoupon(amountTry, couponResult.coupon);
-        discountTry = applied.discountTry;
-        amountTry   = applied.discountedAmount;
-        couponId    = couponResult.coupon.id;
-        console.log(
-          `[PayTR] coupon ${couponResult.coupon.code} applied: -₺${discountTry} → ₺${amountTry}`
-        );
-      } else {
-        // Invalid coupon — reject so the client can show the error instead of
-        // silently charging the full amount.
+      if (couponResult.error) {
+        // Reject so the client can show the error instead of silently charging the full amount.
         return res.status(400).json({ error: couponResult.error });
       }
+      const applied = applyCoupon(amountTry, couponResult.coupon);
+      discountTry = applied.discountTry;
+      amountTry   = applied.discountedAmount;
+      couponId    = couponResult.coupon.id;
+      console.log(
+        `[PayTR] coupon ${couponResult.coupon.code} applied: -₺${discountTry} → ₺${amountTry}`
+      );
     }
 
     const merchantId = process.env.PAYTR_MERCHANT_ID;
@@ -146,11 +97,11 @@ router.post('/token', async (req, res) => {
       .replace(/-/g, '')
       .slice(0, 8)}`;
 
-    // Persist the order. `image_urls` carries the full multi-photo bundle so
-    // the callback can fan out into N print_jobs rows. `image_url` keeps the
-    // first photo populated for back-compat with anything reading the old
-    // single-photo column.
-    await supabase.from('payment_transactions').insert({
+    // Persist the order BEFORE asking PayTR for a token: if this row is missing
+    // the callback cannot create print jobs, so the customer would pay for nothing.
+    // `image_urls` carries the full multi-photo bundle so the callback can fan out
+    // into N print_jobs rows; `image_url` keeps the first photo for back-compat.
+    const { error: txError } = await supabase.from('payment_transactions').insert({
       id: orderId,
       uid,
       type: 'print',
@@ -164,16 +115,9 @@ router.post('/token', async (req, res) => {
       coupon_id: couponId,
       discount_try: discountTry,
     });
-
-    // Increment coupon usage only after the DB row is successfully written.
-    if (couponId) {
-      await incrementCouponUsage(supabase, couponId);
+    if (txError) {
+      throw new Error(`payment_transactions insert failed: ${txError.message}`);
     }
-
-    const clientIp =
-      (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
-      req.socket?.remoteAddress ||
-      '127.0.0.1';
 
     const itemName =
       photoCount === 1
@@ -188,7 +132,7 @@ router.post('/token', async (req, res) => {
       email: `${uid}@fotoshop.app`,
       amountTry,
       itemName,
-      clientIp,
+      clientIp: req.ip || '127.0.0.1',
       merchantOkUrl: `${baseUrl}/ok`,
       merchantFailUrl: `${baseUrl}/fail`,
       testMode,
@@ -197,16 +141,22 @@ router.post('/token', async (req, res) => {
     res.json({ token, orderId, priceTry: amountTry, discountTry });
   } catch (err) {
     console.error('[PayTR] token error:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'payment_init_failed' });
   }
 });
 
 /**
  * POST /paytr/callback
- * Server-to-server notification from PayTR. Must always respond "OK".
+ * Server-to-server notification from PayTR.
  *
- * On success, fans out one `print_jobs` row per image URL — the Python
- * listener already prints one image per row, so no listener change needed.
+ * PayTR re-sends the notification until it receives exactly "OK", so:
+ *   - answer "OK" only once the outcome is durably stored (or the request is
+ *     bogus and must not be retried);
+ *   - answer anything else on an internal failure so PayTR retries;
+ *   - be idempotent, because the same success can arrive more than once.
+ *
+ * On success, fans out one `print_jobs` row per image URL — the booth app prints
+ * one image per row.
  */
 router.post('/callback', express.urlencoded({ extended: false }), async (req, res) => {
   try {
@@ -219,62 +169,98 @@ router.post('/callback', express.urlencoded({ extended: false }), async (req, re
       return res.send('OK');
     }
 
-    const { merchant_oid, status } = req.body;
+    const { merchant_oid, status, total_amount } = req.body;
     const supabase = getSupabase();
 
-    const { data: tx } = await supabase
+    const { data: tx, error: readError } = await supabase
       .from('payment_transactions')
       .select('*')
       .eq('id', merchant_oid)
       .maybeSingle();
+    if (readError) {
+      throw new Error(`payment_transactions read failed: ${readError.message}`);
+    }
 
     if (!tx) {
       console.error(`[PayTR] transaction not found: ${merchant_oid}`);
       return res.send('OK');
     }
 
-    if (status === 'success') {
-      // Prefer the new image_urls array; fall back to the single image_url
-      // column for legacy transactions written before the bundle migration.
-      const urls = Array.isArray(tx.image_urls) && tx.image_urls.length > 0
-        ? tx.image_urls
-        : [tx.image_url].filter(Boolean);
-
-      const rows = urls.map((url, i) => ({
-        // First job keeps the merchant_oid for back-compat with status polling
-        // that derives the job id from the transaction; later jobs append _i.
-        id: urls.length === 1 ? merchant_oid : `${merchant_oid}_${i}`,
-        booth_code: tx.booth_code,
-        status: 'pending',
-        image_url: url,
-        user_id: tx.uid,
-        copies: 1,
-        paper_finish: tx.paper_finish,
-        is_paid_by_money: true,
-      }));
-
-      await supabase.from('print_jobs').insert(rows);
-      await supabase
-        .from('payment_transactions')
-        .update({ status: 'paid' })
-        .eq('id', merchant_oid);
-      console.log(
-        `[PayTR] payment success → ${rows.length} print job(s) created: ${merchant_oid}`
-      );
-    } else {
-      await supabase
-        .from('payment_transactions')
-        .update({ status: 'unpaid' })
-        .eq('id', merchant_oid);
-      console.log(`[PayTR] payment failed: ${merchant_oid}`);
+    if (tx.status !== 'wait') {
+      console.log(`[PayTR] duplicate notification for ${merchant_oid} (status=${tx.status}) — ignored`);
+      return res.send('OK');
     }
 
+    if (status !== 'success') {
+      await setTransactionStatus(supabase, merchant_oid, 'unpaid');
+      console.log(`[PayTR] payment failed: ${merchant_oid}`);
+      return res.send('OK');
+    }
+
+    // total_amount is in kuruş and covered by the verified hash. It can exceed the
+    // order price (installment interest) but must never be below it.
+    const paidKurus = Number(total_amount);
+    const expectedKurus = Math.round(Number(tx.amount_try) * 100);
+    if (!Number.isFinite(paidKurus) || paidKurus < expectedKurus) {
+      console.error(
+        `[PayTR] amount mismatch for ${merchant_oid}: paid=${total_amount} expected=${expectedKurus} — needs review`
+      );
+      await setTransactionStatus(supabase, merchant_oid, 'amount_mismatch');
+      return res.send('OK');
+    }
+
+    // Prefer the image_urls array; fall back to the single image_url column for
+    // legacy transactions written before the bundle migration.
+    const urls = Array.isArray(tx.image_urls) && tx.image_urls.length > 0
+      ? tx.image_urls
+      : [tx.image_url].filter(Boolean);
+
+    const rows = urls.map((url, i) => ({
+      // First job keeps the merchant_oid for back-compat with status polling
+      // that derives the job id from the transaction; later jobs append _i.
+      id: urls.length === 1 ? merchant_oid : `${merchant_oid}_${i}`,
+      booth_code: tx.booth_code,
+      status: 'pending',
+      image_url: url,
+      user_id: tx.uid,
+      copies: 1,
+      paper_finish: tx.paper_finish,
+      is_paid_by_money: true,
+    }));
+
+    // Deterministic ids + ignoreDuplicates make a retry after a partial failure safe.
+    const { error: jobsError } = await supabase
+      .from('print_jobs')
+      .upsert(rows, { onConflict: 'id', ignoreDuplicates: true });
+    if (jobsError) {
+      throw new Error(`print_jobs insert failed: ${jobsError.message}`);
+    }
+
+    await setTransactionStatus(supabase, merchant_oid, 'paid');
+
+    if (tx.coupon_id) {
+      await incrementCouponUsage(supabase, tx.coupon_id);
+    }
+
+    console.log(
+      `[PayTR] payment success → ${rows.length} print job(s) created: ${merchant_oid}`
+    );
     res.send('OK');
   } catch (err) {
-    console.error('[PayTR] callback error:', err.message);
-    res.send('OK');
+    console.error('[PayTR] callback error (PayTR will retry):', err.message);
+    res.status(500).send('RETRY');
   }
 });
+
+async function setTransactionStatus(supabase, id, status) {
+  const { error } = await supabase
+    .from('payment_transactions')
+    .update({ status })
+    .eq('id', id);
+  if (error) {
+    throw new Error(`payment_transactions update to ${status} failed: ${error.message}`);
+  }
+}
 
 /**
  * GET /paytr/status/:orderId
@@ -282,16 +268,18 @@ router.post('/callback', express.urlencoded({ extended: false }), async (req, re
 router.get('/status/:orderId', async (req, res) => {
   try {
     const supabase = getSupabase();
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('payment_transactions')
       .select('status')
       .eq('id', req.params.orderId)
       .maybeSingle();
+    if (error) throw new Error(error.message);
 
     if (!data) return res.status(404).json({ error: 'Not found' });
     res.json({ status: data.status, orderId: req.params.orderId });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[PayTR] status error:', err.message);
+    res.status(500).json({ error: 'status_unavailable' });
   }
 });
 

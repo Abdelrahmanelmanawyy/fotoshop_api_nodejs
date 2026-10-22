@@ -11,8 +11,10 @@ import paytrRoutes from "./presentation/routes/paytr.js";
 import iapRoutes from "./presentation/routes/iap.js";
 import pricingRoutes from "./presentation/routes/pricing.js";
 import couponRoutes from "./presentation/routes/coupons.js";
+import printRoutes from "./presentation/routes/print.js";
 import stripeRoutes, { stripeWebhookHandler } from "./presentation/routes/stripe.js";
 import { authenticate } from "./presentation/middleware/auth.js";
+import { requireSupabase } from "./presentation/middleware/requireSupabase.js";
 import {
   aiRateLimiter,
   aiDailyRateLimiter,
@@ -23,6 +25,19 @@ import { startOrderSweeper } from "./domain/orderSweeper.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// How many reverse proxies sit in front of Node (Cloudflare = 1, Cloudflare + nginx = 2).
+// Express then derives req.ip from the right-most untrusted X-Forwarded-For hop,
+// which a client cannot spoof. Rate limiting and PayTR's user_ip depend on it.
+app.set("trust proxy", parseTrustProxy(process.env.TRUST_PROXY));
+
+function parseTrustProxy(value) {
+  if (value === undefined || value === "") return 1;
+  if (/^\d+$/.test(value)) return Number(value);
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return value; // e.g. "loopback, 10.0.0.0/8"
+}
 
 // --- CORS (web version: photoshopapp.com) ---------------------------------
 // The mobile app is a native client and ignores CORS, so this only affects the
@@ -96,7 +111,7 @@ function checkEnv() {
     console.warn("[ENV] Stripe: missing STRIPE_SECRET_KEY — /stripe/checkout will return errors until set.");
   }
   if (!process.env.STRIPE_WEBHOOK_SECRET) {
-    console.warn("[ENV] Stripe: missing STRIPE_WEBHOOK_SECRET — webhook signature verification disabled (DEV ONLY).");
+    console.warn("[ENV] Stripe: missing STRIPE_WEBHOOK_SECRET — all Stripe webhooks will be rejected, so web purchases will not grant credits.");
   }
 
   // IAP credentials — only required when IAP_DEV_MODE is NOT set.
@@ -157,17 +172,18 @@ app.get("/health", async (req, res) => {
 
 // Cost-incurring routes: authenticate (soft until REQUIRE_AUTH=1), then rate-limit
 // per user, then enforce the global spend circuit breaker.
-app.use("/process", authenticate, aiRateLimiter, aiDailyRateLimiter, spendCapGuard, processRoutes);
+app.use("/process", requireSupabase, authenticate, aiRateLimiter, aiDailyRateLimiter, spendCapGuard, processRoutes);
 app.use("/biometric", authenticate, aiRateLimiter, aiDailyRateLimiter, spendCapGuard, biometricRoutes);
 
-// PayTR/Stripe webhooks are provider-to-server callbacks (signature-verified
-// inside the route) — no user JWT, no rate limit.
-app.use("/paytr", paytrRoutes);
-app.use("/stripe", stripeRoutes);
+// These routers mix user actions (authenticated + rate-limited inside the
+// router) with provider callbacks (signature-verified, no user JWT).
+app.use("/paytr", requireSupabase, paytrRoutes);
+app.use("/stripe", requireSupabase, stripeRoutes);
 
 // Authenticated user actions — coarse rate limit, no spend guard.
-app.use("/iap", authenticate, generalRateLimiter, iapRoutes);
-app.use("/coupon", authenticate, generalRateLimiter, couponRoutes);
+app.use("/iap", requireSupabase, authenticate, generalRateLimiter, iapRoutes);
+app.use("/coupon", requireSupabase, authenticate, generalRateLimiter, couponRoutes);
+app.use("/print", requireSupabase, authenticate, generalRateLimiter, printRoutes);
 
 // Public read-only.
 app.use("/pricing", pricingRoutes);
@@ -180,12 +196,15 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Internal server error" });
 });
 
-// Process-level safety nets — log instead of silently dying.
+// Process-level safety nets. A rejected promise nobody awaited is logged; an
+// uncaught exception leaves the process in an unknown state, so log and exit —
+// pm2 restarts it and the order sweeper reconciles interrupted jobs on boot.
 process.on("unhandledRejection", (reason) => {
   console.error("[Process] Unhandled promise rejection:", reason);
 });
 process.on("uncaughtException", (err) => {
-  console.error("[Process] Uncaught exception:", err);
+  console.error("[Process] Uncaught exception — exiting:", err);
+  process.exit(1);
 });
 
 export { app };

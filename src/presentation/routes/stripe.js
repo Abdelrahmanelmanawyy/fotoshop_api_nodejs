@@ -1,43 +1,37 @@
 import { Router } from 'express';
-import { getSupabase } from '../../config/supabase.js';
 import { createCheckoutSession, handleWebhookEvent } from '../../domain/stripeService.js';
+import { authenticate, resolveUserId } from '../middleware/auth.js';
+import { generalRateLimiter } from '../middleware/rateLimit.js';
 
 const router = Router();
 
-router.use((req, res, next) => {
-  try {
-    getSupabase();
-    next();
-  } catch (err) {
-    res.status(500).json({ error: 'Supabase initialization failed', message: err.message });
-  }
-});
-
 /**
  * POST /stripe/checkout
- * Body: { uid, productId }  (productId: credits_20 | credits_50 | credits_100)
+ * Body: { productId, uid? }  (productId: credits_20 | credits_50 | credits_100)
  *
  * Creates a Stripe Checkout Session (price decided server-side) and returns its
  * hosted URL. The web app redirects the browser to this URL. Credits are granted
  * later by the webhook, NOT here.
  */
-router.post('/checkout', async (req, res) => {
+router.post('/checkout', authenticate, generalRateLimiter, async (req, res) => {
   try {
-    const { uid, productId } = req.body || {};
-    if (!uid || !productId) {
-      return res.status(400).json({ error: 'uid and productId are required' });
+    const { productId } = req.body || {};
+    const who = resolveUserId(req, req.body?.uid);
+    if (!who.ok) return res.status(who.status).json({ error: who.error });
+    if (!productId) {
+      return res.status(400).json({ error: 'productId is required' });
     }
 
-    console.log(`[API] POST /stripe/checkout uid=${uid} product=${productId}`);
+    console.log(`[API] POST /stripe/checkout uid=${who.uid} product=${productId}`);
 
-    const result = await createCheckoutSession({ uid, productId });
+    const result = await createCheckoutSession({ uid: who.uid, productId });
     if (!result.ok) {
       return res.status(result.status || 400).json({ error: result.error });
     }
     res.json({ url: result.url, id: result.id });
   } catch (err) {
     console.error('[Stripe] checkout error:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    res.status(500).json({ error: 'checkout_failed' });
   }
 });
 
@@ -57,7 +51,7 @@ export async function stripeWebhookHandler(req, res) {
   } catch (err) {
     // Signature failure or processing error -> 400 so Stripe retries.
     console.error('[Stripe] webhook error:', err.message);
-    res.status(400).json({ error: `Webhook Error: ${err.message}` });
+    res.status(400).json({ error: 'webhook_rejected' });
   }
 }
 
