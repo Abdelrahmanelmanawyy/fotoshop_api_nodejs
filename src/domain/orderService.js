@@ -20,6 +20,9 @@ export function resolveEditPrompt(photo) {
  * @param {Function} deps.uploadImageFromUrl
  * @param {Function} deps.getOrder
  * @param {Function} deps.updatePhotoOutput
+ * @param {Function} [deps.isOrderPaid]   (orderId) => boolean — a spend exists for this order
+ * @param {Function} [deps.claimOrder]    (orderId, { staleMs }) => boolean — atomic pending→processing
+ * @param {number}   [deps.processingStaleMs]
  */
 export function createOrderService(deps) {
   const {
@@ -32,6 +35,9 @@ export function createOrderService(deps) {
     // Optional — present in production wiring, omitted in some unit tests.
     setOrderStatus = async () => {},
     refundOrder = async () => false,
+    isOrderPaid = async () => true,
+    claimOrder = async () => true,
+    processingStaleMs = 12 * 60 * 1000,
   } = deps;
 
   async function processPhoto(orderId, photo, collectionName = "orders") {
@@ -90,8 +96,20 @@ export function createOrderService(deps) {
       throw new Error(`Order ${orderId} has no photos`);
     }
 
-    // Mark in-flight (also increments attempts) so the reconciliation sweeper
-    // and the client can distinguish "being worked on" from "stuck pending".
+    // Never spend model money on an order the user was not charged for.
+    if (!(await isOrderPaid(orderId))) {
+      console.warn(`[Processor] Order ${orderId} has no spend record — not processing`);
+      await setOrderStatus(orderId, "failed", "unpaid");
+      return { order_id: orderId, results: [], skipped: "unpaid" };
+    }
+
+    // Exactly one worker may run an order at a time (route, retry, sweeper).
+    if (!(await claimOrder(orderId, { staleMs: processingStaleMs }))) {
+      console.log(`[Processor] Order ${orderId} already claimed or finished — skipping`);
+      return { order_id: orderId, results: [], skipped: "already_claimed" };
+    }
+
+    // Increments attempts so the sweeper can give up after MAX_ATTEMPTS.
     await setOrderStatus(orderId, "processing");
 
     const results = [];

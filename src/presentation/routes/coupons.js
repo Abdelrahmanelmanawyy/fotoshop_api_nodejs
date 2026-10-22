@@ -7,6 +7,7 @@
 import { Router } from 'express';
 import { getSupabase } from '../../config/supabase.js';
 import { validateCouponCode, applyCoupon, incrementCouponUsage } from '../../domain/couponService.js';
+import { resolveUserId } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -59,15 +60,19 @@ router.post('/validate', async (req, res) => {
  * 400:    { error: string }
  */
 router.post('/redeem-free', async (req, res) => {
-  const { couponCode, originalAmountTry, boothCode, uid } = req.body ?? {};
+  const { couponCode, originalAmountTry, boothCode } = req.body ?? {};
 
-  if (!couponCode || !uid) {
-    return res.status(400).json({ error: 'couponCode and uid are required' });
+  const who = resolveUserId(req, req.body?.uid);
+  if (!who.ok) return res.status(who.status).json({ error: who.error });
+  const uid = who.uid;
+
+  if (!couponCode) {
+    return res.status(400).json({ error: 'couponCode is required' });
   }
 
   const originalAmount = parseFloat(originalAmountTry);
-  if (!Number.isFinite(originalAmount) || originalAmount < 0) {
-    return res.status(400).json({ error: 'originalAmountTry must be a non-negative number' });
+  if (!Number.isFinite(originalAmount) || originalAmount <= 0) {
+    return res.status(400).json({ error: 'originalAmountTry must be a positive number' });
   }
 
   const supabase = getSupabase();
@@ -79,6 +84,11 @@ router.post('/redeem-free', async (req, res) => {
   }
 
   const coupon = result.coupon;
+
+  // Only a coupon that really brings the price to zero may skip payment.
+  if (applyCoupon(originalAmount, coupon).discountedAmount > 0) {
+    return res.status(400).json({ error: 'Coupon does not cover the full price' });
+  }
 
   // Build a unique transaction ID for this free redemption
   const txId = `free_${uid.replace(/-/g, '').slice(0, 8)}_${Date.now()}`;

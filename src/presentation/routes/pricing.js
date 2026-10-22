@@ -20,7 +20,7 @@ router.get('/config', async (_req, res) => {
     res.json({ ...pricing, max_photos_per_order: MAX_PHOTOS_PER_ORDER });
   } catch (err) {
     console.error('[pricing] config error:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'pricing_unavailable' });
   }
 });
 

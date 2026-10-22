@@ -76,21 +76,23 @@ export async function createCheckoutSession({ uid, productId }) {
 /**
  * Verify + parse an incoming webhook payload. Pass the RAW request body
  * (Buffer/string, NOT JSON-parsed) and the `stripe-signature` header.
- * When STRIPE_WEBHOOK_SECRET is set the signature is verified; otherwise we
- * fall back to a plain parse (DEV ONLY — set the secret in production).
+ *
+ * Fails closed: without STRIPE_WEBHOOK_SECRET every event is rejected, because
+ * an unsigned `checkout.session.completed` would let anyone grant themselves
+ * credits. For local testing use `stripe listen`, which prints a secret.
  *
  * On `checkout.session.completed` we grant credits exactly once.
  * Returns the parsed event.
  */
 export async function handleWebhookEvent(rawBody, signature) {
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
-  let event;
-  if (secret) {
-    event = stripe().webhooks.constructEvent(rawBody, signature, secret);
-  } else {
-    console.warn('[Stripe] STRIPE_WEBHOOK_SECRET not set — skipping signature verification (DEV ONLY)');
-    event = JSON.parse(Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : rawBody);
+  if (!secret) {
+    throw new Error('STRIPE_WEBHOOK_SECRET not configured — webhook rejected');
   }
+  if (!signature) {
+    throw new Error('missing stripe-signature header');
+  }
+  const event = stripe().webhooks.constructEvent(rawBody, signature, secret);
 
   if (event.type === 'checkout.session.completed') {
     await grantFromSession(event.data.object);
