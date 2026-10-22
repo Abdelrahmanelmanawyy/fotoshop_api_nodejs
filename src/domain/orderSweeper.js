@@ -28,7 +28,29 @@ const HARD_AGE_MS = envInt("SWEEP_HARD_AGE_MS", 15 * 60 * 1000); // give up & re
 const MAX_ATTEMPTS = envInt("SWEEP_MAX_ATTEMPTS", 3);
 const BATCH = envInt("SWEEP_BATCH", 20);
 
-let running = false;
+let ticking = false; // a tick is currently executing (overlap guard)
+let started = false; // startOrderSweeper() was called and not stopped
+let startedAt = null;
+let tickStartedAt = null;
+let lastRunAt = null; // end of the last tick that completed without error
+let lastError = null;
+
+/**
+ * Snapshot for /health. `running` = the periodic loop is active (not "a tick is executing").
+ * Times are epoch ms. `busy` ticks (re-processing a slow order) are allowed to stay quiet
+ * for up to `busyGraceMs` before the health check calls the sweeper stale.
+ */
+export function getSweeperStatus() {
+  return {
+    running: started,
+    startedAt,
+    lastRunAt,
+    lastError,
+    busy: ticking,
+    intervalMs: INTERVAL_MS,
+    busyGraceMs: HARD_AGE_MS,
+  };
+}
 
 async function handleOrder(order) {
   const ageMs = Date.now() - new Date(order.created_at).getTime();
@@ -55,8 +77,9 @@ async function handleOrder(order) {
 }
 
 async function tick() {
-  if (running) return; // never overlap ticks
-  running = true;
+  if (ticking) return; // never overlap ticks
+  ticking = true;
+  tickStartedAt = Date.now();
   try {
     const stuck = await database.getStuckOrders({
       pendingGraceMs: PENDING_GRACE_MS,
@@ -69,10 +92,13 @@ async function tick() {
     for (const order of stuck) {
       await handleOrder(order);
     }
+    lastRunAt = Date.now();
+    lastError = null;
   } catch (err) {
+    lastError = err.message;
     console.error(`[Sweeper] tick error: ${err.message}`);
   } finally {
-    running = false;
+    ticking = false;
   }
 }
 
@@ -82,9 +108,16 @@ export function startOrderSweeper() {
     `[Sweeper] Started — every ${INTERVAL_MS}ms (pendingGrace=${PENDING_GRACE_MS}ms, ` +
     `processingGrace=${PROCESSING_GRACE_MS}ms, hardAge=${HARD_AGE_MS}ms, maxAttempts=${MAX_ATTEMPTS})`
   );
+  started = true;
+  startedAt = Date.now();
   const handle = setInterval(tick, INTERVAL_MS);
   if (typeof handle.unref === "function") handle.unref();
   // Kick one shortly after boot so a restart immediately reconciles backlog.
-  setTimeout(tick, 10 * 1000).unref?.();
-  return () => clearInterval(handle);
+  const bootKick = setTimeout(tick, 10 * 1000);
+  bootKick.unref?.();
+  return () => {
+    clearInterval(handle);
+    clearTimeout(bootKick);
+    started = false;
+  };
 }

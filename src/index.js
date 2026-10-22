@@ -1,3 +1,4 @@
+import "./instrument.js"; // must stay first: loads .env and starts crash reporting (if SENTRY_DSN is set)
 import "./load-env.js";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -21,7 +22,9 @@ import {
   generalRateLimiter,
 } from "./presentation/middleware/rateLimit.js";
 import { spendCapGuard } from "./domain/spendGuard.js";
-import { startOrderSweeper } from "./domain/orderSweeper.js";
+import { startOrderSweeper, getSweeperStatus } from "./domain/orderSweeper.js";
+import { createHealthHandler } from "./presentation/routes/health.js";
+import { reportError, flushErrorReporting } from "./core/errorReporting.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -149,26 +152,8 @@ app.get("/", (req, res) => {
   });
 });
 
-/** Fast liveness check (no external APIs). Use GET /health?full=1 to verify Replicate too. */
-app.get("/health", async (req, res) => {
-  const full = req.query.full === "1" || req.query.full === "true";
-  if (!full) {
-    console.log(`[API] GET /health from ${req.headers['x-forwarded-for'] || req.socket.remoteAddress}`);
-    return res.json({
-      status: "ok",
-      timestamp: new Date().toISOString(),
-    });
-  }
-
-  console.log("[API] GET /health?full=1");
-  const replicate = await verifyReplicateAuth();
-  res.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    replicate: replicate.ok ? "ok" : "error",
-    replicate_message: replicate.ok ? undefined : replicate.message,
-  });
-});
+/** Fast liveness check (no external APIs, no logging). 503 if the order sweeper is stale. GET /health?full=1 also verifies Replicate. */
+app.get("/health", createHealthHandler({ getSweeperStatus, verifyReplicateAuth }));
 
 // Cost-incurring routes: authenticate (soft until REQUIRE_AUTH=1), then rate-limit
 // per user, then enforce the global spend circuit breaker.
@@ -192,6 +177,9 @@ app.use("/pricing", pricingRoutes);
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error("[API] Unhandled route error:", err);
+  // Client errors (e.g. malformed JSON body, status 4xx) are not crashes — don't page on them.
+  const status = err?.status ?? err?.statusCode;
+  if (!(status >= 400 && status < 500)) reportError(err, { area: "express" });
   if (res.headersSent) return;
   res.status(500).json({ error: "Internal server error" });
 });
@@ -201,10 +189,14 @@ app.use((err, req, res, next) => {
 // pm2 restarts it and the order sweeper reconciles interrupted jobs on boot.
 process.on("unhandledRejection", (reason) => {
   console.error("[Process] Unhandled promise rejection:", reason);
+  reportError(reason instanceof Error ? reason : new Error(String(reason)), { area: "unhandledRejection" });
 });
 process.on("uncaughtException", (err) => {
   console.error("[Process] Uncaught exception — exiting:", err);
-  process.exit(1);
+  reportError(err, { area: "uncaughtException" });
+  // Give Sentry a moment to send the event (no-op when not configured); hard cap 2.5s.
+  setTimeout(() => process.exit(1), 2500).unref();
+  flushErrorReporting(2000).finally(() => process.exit(1));
 });
 
 export { app };

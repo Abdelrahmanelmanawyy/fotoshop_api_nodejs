@@ -21,5 +21,6 @@ Do not introduce TypeScript, Prisma, Fastify or another test framework.
 - Long work is async (202 + realtime + sweeper). Do not hold requests open for model calls.
 
 ## Commands
-`npm test` (all of `test/*.test.js`) · `npm run dev:watch` · prod: EC2, pm2 `fotoshop-api`, branch `main` (deploy only when asked).
+`npm test` (all of `test/*.test.js`; CI runs it on PRs and pushes: `.github/workflows/ci.yml`) · `npm run dev:watch` · prod: EC2, pm2 `fotoshop-api`, branch `main` (deploy only when asked) via `scripts/deploy.sh [branch]` run on the box; it health-checks and fails loudly.
+`GET /health` returns 503 `degraded` if the order sweeper stopped; `SENTRY_DSN` (optional, `src/instrument.js`) enables crash reporting.
 Env reference: `.env.example`. Key flags: `REQUIRE_AUTH`, `IAP_DEV_MODE` (dev only), `TRUST_PROXY`, `STRIPE_WEBHOOK_SECRET`.
