@@ -10,7 +10,7 @@ const ALLOWED_PLATFORMS = new Set(['android', 'ios']);
  * Body: { platform: 'android'|'ios', productId, verificationData, uid? }
  *  - Android: verificationData = purchase token
  *             (purchase.verificationData.serverVerificationData)
- *  - iOS:     verificationData = base64-encoded App Store receipt-data
+ *  - iOS:     verificationData = StoreKit 2 JWS signed transaction (iOS 15+) or base64 receipt
  *             (purchase.verificationData.serverVerificationData)
  *
  * Validates the purchase with Google/Apple (or skips if IAP_DEV_MODE=1)
