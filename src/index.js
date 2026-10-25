@@ -1,3 +1,4 @@
+import "./instrument.js"; // must stay first: loads .env and starts crash reporting (if SENTRY_DSN is set)
 import "./load-env.js";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -11,18 +12,35 @@ import paytrRoutes from "./presentation/routes/paytr.js";
 import iapRoutes from "./presentation/routes/iap.js";
 import pricingRoutes from "./presentation/routes/pricing.js";
 import couponRoutes from "./presentation/routes/coupons.js";
+import printRoutes from "./presentation/routes/print.js";
 import stripeRoutes, { stripeWebhookHandler } from "./presentation/routes/stripe.js";
 import { authenticate } from "./presentation/middleware/auth.js";
+import { requireSupabase } from "./presentation/middleware/requireSupabase.js";
 import {
   aiRateLimiter,
   aiDailyRateLimiter,
   generalRateLimiter,
 } from "./presentation/middleware/rateLimit.js";
 import { spendCapGuard } from "./domain/spendGuard.js";
-import { startOrderSweeper } from "./domain/orderSweeper.js";
+import { startOrderSweeper, getSweeperStatus } from "./domain/orderSweeper.js";
+import { createHealthHandler } from "./presentation/routes/health.js";
+import { reportError, flushErrorReporting } from "./core/errorReporting.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// How many reverse proxies sit in front of Node (Cloudflare = 1, Cloudflare + nginx = 2).
+// Express then derives req.ip from the right-most untrusted X-Forwarded-For hop,
+// which a client cannot spoof. Rate limiting and PayTR's user_ip depend on it.
+app.set("trust proxy", parseTrustProxy(process.env.TRUST_PROXY));
+
+function parseTrustProxy(value) {
+  if (value === undefined || value === "") return 1;
+  if (/^\d+$/.test(value)) return Number(value);
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return value; // e.g. "loopback, 10.0.0.0/8"
+}
 
 // --- CORS (web version: photoshopapp.com) ---------------------------------
 // The mobile app is a native client and ignores CORS, so this only affects the
@@ -96,7 +114,7 @@ function checkEnv() {
     console.warn("[ENV] Stripe: missing STRIPE_SECRET_KEY — /stripe/checkout will return errors until set.");
   }
   if (!process.env.STRIPE_WEBHOOK_SECRET) {
-    console.warn("[ENV] Stripe: missing STRIPE_WEBHOOK_SECRET — webhook signature verification disabled (DEV ONLY).");
+    console.warn("[ENV] Stripe: missing STRIPE_WEBHOOK_SECRET — all Stripe webhooks will be rejected, so web purchases will not grant credits.");
   }
 
   // IAP credentials — only required when IAP_DEV_MODE is NOT set.
@@ -114,9 +132,11 @@ function checkEnv() {
       if (iapAndroidCreds) parts.push("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON or GOOGLE_PLAY_SERVICE_ACCOUNT_PATH");
       console.warn(`[ENV] IAP/Android: missing ${parts.join(", ")} — Android IAP verification will fail.`);
     }
-    const iapIos = ["APPLE_SHARED_SECRET"].filter((k) => !process.env[k]);
-    if (iapIos.length) {
-      console.warn(`[ENV] IAP/iOS: missing ${iapIos.join(", ")} — iOS IAP verification will fail.`);
+    if (!process.env.APPLE_APP_ID) {
+      console.warn("[ENV] IAP/iOS: missing APPLE_APP_ID — StoreKit 2 (JWS) purchases can only be verified in Sandbox; production iOS 15+ purchases will fail.");
+    }
+    if (!process.env.APPLE_SHARED_SECRET) {
+      console.warn("[ENV] IAP/iOS: missing APPLE_SHARED_SECRET — legacy base64 receipts (iOS < 15) will fail.");
     }
   }
 }
@@ -134,40 +154,23 @@ app.get("/", (req, res) => {
   });
 });
 
-/** Fast liveness check (no external APIs). Use GET /health?full=1 to verify Replicate too. */
-app.get("/health", async (req, res) => {
-  const full = req.query.full === "1" || req.query.full === "true";
-  if (!full) {
-    console.log(`[API] GET /health from ${req.headers['x-forwarded-for'] || req.socket.remoteAddress}`);
-    return res.json({
-      status: "ok",
-      timestamp: new Date().toISOString(),
-    });
-  }
-
-  console.log("[API] GET /health?full=1");
-  const replicate = await verifyReplicateAuth();
-  res.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    replicate: replicate.ok ? "ok" : "error",
-    replicate_message: replicate.ok ? undefined : replicate.message,
-  });
-});
+/** Fast liveness check (no external APIs, no logging). 503 if the order sweeper is stale. GET /health?full=1 also verifies Replicate. */
+app.get("/health", createHealthHandler({ getSweeperStatus, verifyReplicateAuth }));
 
 // Cost-incurring routes: authenticate (soft until REQUIRE_AUTH=1), then rate-limit
 // per user, then enforce the global spend circuit breaker.
-app.use("/process", authenticate, aiRateLimiter, aiDailyRateLimiter, spendCapGuard, processRoutes);
+app.use("/process", requireSupabase, authenticate, aiRateLimiter, aiDailyRateLimiter, spendCapGuard, processRoutes);
 app.use("/biometric", authenticate, aiRateLimiter, aiDailyRateLimiter, spendCapGuard, biometricRoutes);
 
-// PayTR/Stripe webhooks are provider-to-server callbacks (signature-verified
-// inside the route) — no user JWT, no rate limit.
-app.use("/paytr", paytrRoutes);
-app.use("/stripe", stripeRoutes);
+// These routers mix user actions (authenticated + rate-limited inside the
+// router) with provider callbacks (signature-verified, no user JWT).
+app.use("/paytr", requireSupabase, paytrRoutes);
+app.use("/stripe", requireSupabase, stripeRoutes);
 
 // Authenticated user actions — coarse rate limit, no spend guard.
-app.use("/iap", authenticate, generalRateLimiter, iapRoutes);
-app.use("/coupon", authenticate, generalRateLimiter, couponRoutes);
+app.use("/iap", requireSupabase, authenticate, generalRateLimiter, iapRoutes);
+app.use("/coupon", requireSupabase, authenticate, generalRateLimiter, couponRoutes);
+app.use("/print", requireSupabase, authenticate, generalRateLimiter, printRoutes);
 
 // Public read-only.
 app.use("/pricing", pricingRoutes);
@@ -176,16 +179,26 @@ app.use("/pricing", pricingRoutes);
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error("[API] Unhandled route error:", err);
+  // Client errors (e.g. malformed JSON body, status 4xx) are not crashes — don't page on them.
+  const status = err?.status ?? err?.statusCode;
+  if (!(status >= 400 && status < 500)) reportError(err, { area: "express" });
   if (res.headersSent) return;
   res.status(500).json({ error: "Internal server error" });
 });
 
-// Process-level safety nets — log instead of silently dying.
+// Process-level safety nets. A rejected promise nobody awaited is logged; an
+// uncaught exception leaves the process in an unknown state, so log and exit —
+// pm2 restarts it and the order sweeper reconciles interrupted jobs on boot.
 process.on("unhandledRejection", (reason) => {
   console.error("[Process] Unhandled promise rejection:", reason);
+  reportError(reason instanceof Error ? reason : new Error(String(reason)), { area: "unhandledRejection" });
 });
 process.on("uncaughtException", (err) => {
-  console.error("[Process] Uncaught exception:", err);
+  console.error("[Process] Uncaught exception — exiting:", err);
+  reportError(err, { area: "uncaughtException" });
+  // Give Sentry a moment to send the event (no-op when not configured); hard cap 2.5s.
+  setTimeout(() => process.exit(1), 2500).unref();
+  flushErrorReporting(2000).finally(() => process.exit(1));
 });
 
 export { app };

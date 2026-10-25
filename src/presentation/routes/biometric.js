@@ -80,11 +80,12 @@ router.post("/process", handleMulterUpload, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Biometric process error:", err);
-    const status = err.message?.includes("Invalid package") ? 400 : 500;
-    res.status(status).json({
+    const invalidPackage = err.message?.includes("Invalid package");
+    res.status(invalidPackage ? 400 : 500).json({
       status: false,
-      error: status === 400 ? "invalid_request" : "processing_failed",
-      message: err.message || "Failed to process biometric photo",
+      error: invalidPackage ? "invalid_request" : "processing_failed",
+      // Only the validation message is safe to show; upstream errors stay in the log.
+      message: invalidPackage ? err.message : "Failed to process biometric photo",
     });
   }
 });

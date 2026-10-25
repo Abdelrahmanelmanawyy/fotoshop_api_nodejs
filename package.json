@@ -11,6 +11,8 @@
     "test": "node --test ./test/*.test.js"
   },
   "dependencies": {
+    "@apple/app-store-server-library": "^3.1.0",
+    "@sentry/node": "^11.8.0",
     "@supabase/supabase-js": "^2.49.4",
     "axios": "^1.7.7",
     "dotenv": "^16.4.5",

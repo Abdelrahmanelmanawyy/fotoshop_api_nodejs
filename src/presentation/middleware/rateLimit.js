@@ -10,13 +10,12 @@
  * this with a shared Redis-backed limiter so the window is global.
  */
 
-function keyFor(req) {
+// Uses req.ip, which honours the app's `trust proxy` setting (see index.js).
+// Never read X-Forwarded-For directly: its left-most entry is client-controlled,
+// so keying on it lets a caller pick a fresh bucket per request.
+export function keyFor(req) {
   if (req.user?.id) return `u:${req.user.id}`;
-  const ip =
-    req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-    req.socket?.remoteAddress ||
-    "unknown";
-  return `ip:${ip}`;
+  return `ip:${req.ip || req.socket?.remoteAddress || "unknown"}`;
 }
 
 /**

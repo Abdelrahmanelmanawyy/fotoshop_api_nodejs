@@ -20,10 +20,13 @@ export async function validateCouponCode(supabase, rawCode) {
 
   const code = rawCode.trim().toUpperCase();
 
+  // Codes are stored upper-case (unique index on upper(code)), so compare exactly.
+  // Never use ilike here: `%` and `_` in user input are wildcards and would match
+  // codes the user does not know.
   const { data: coupon, error: dbErr } = await supabase
     .from('coupons')
     .select('*')
-    .ilike('code', code)   // case-insensitive match
+    .eq('code', code)
     .eq('active', true)
     .maybeSingle();
 
@@ -82,7 +85,8 @@ export function applyCoupon(originalTry, coupon) {
 
 /**
  * Atomically increment the coupon's used_count.
- * Called once the PayTR token is successfully created (not on /coupon/validate).
+ * Called when a paid PayTR callback succeeds or a 100% coupon is redeemed
+ * (not on /coupon/validate or when a checkout is merely started).
  *
  * @param {import('@supabase/supabase-js').SupabaseClient} supabase
  * @param {string} couponId
