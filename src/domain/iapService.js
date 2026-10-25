@@ -1,6 +1,8 @@
 import { getSupabase } from '../config/supabase.js';
 import { verifyGooglePlayPurchase } from '../data/googlePlay.js';
 import { verifyAppleReceipt } from '../data/appleStore.js';
+import { appleJwsConfig, looksLikeJws, verifyAppleJws } from '../data/appleJws.js';
+import { Type } from '@apple/app-store-server-library';
 
 /**
  * Credits granted per product ID. Must match Flutter's
@@ -26,7 +28,12 @@ const PRODUCT_CREDITS = {
  * Returns { ok: true, credits, externalRef } on success,
  *         { ok: false, status, error, reason? } on failure.
  */
-export async function verifyAndGrant({ uid, platform, productId, verificationData }) {
+export async function verifyAndGrant(
+  { uid, platform, productId, verificationData },
+  deps = {}
+) {
+  const verifyJws = deps.verifyJws || verifyAppleJws;
+  const verifyReceipt = deps.verifyReceipt || verifyAppleReceipt;
   const credits = PRODUCT_CREDITS[productId];
   if (!credits) {
     return { ok: false, status: 400, error: 'unknown_product' };
@@ -54,12 +61,39 @@ export async function verifyAndGrant({ uid, platform, productId, verificationDat
       return { ok: false, status: 400, error: 'verification_failed', reason: v.reason };
     }
     externalRef = v.orderId;
+  } else if (platform === 'ios' && looksLikeJws(verificationData)) {
+    // StoreKit 2 signed transaction (iOS 15+). The transactionId equals the
+    // legacy receipt transaction_id, so the dedupe id below is shared.
+    const cfg = appleJwsConfig();
+    const v = await verifyJws({ jws: verificationData, ...cfg });
+    if (!v.ok) {
+      return { ok: false, status: 400, error: 'invalid_transaction', reason: v.reason };
+    }
+    const tx = v.transaction || {};
+    if (tx.bundleId !== cfg.bundleId) {
+      console.error(`[IAP] JWS bundle mismatch (uid=${uid}): ${tx.bundleId}`);
+      return { ok: false, status: 400, error: 'invalid_transaction', reason: 'bundle_mismatch' };
+    }
+    if (tx.productId !== productId || !PRODUCT_CREDITS[tx.productId]) {
+      console.error(`[IAP] JWS product mismatch (uid=${uid}): claimed=${productId} signed=${tx.productId}`);
+      return { ok: false, status: 400, error: 'product_mismatch' };
+    }
+    if (tx.type !== Type.CONSUMABLE) {
+      return { ok: false, status: 400, error: 'invalid_transaction', reason: 'not_consumable' };
+    }
+    if (tx.revocationDate) {
+      return { ok: false, status: 400, error: 'invalid_transaction', reason: 'revoked' };
+    }
+    if (!tx.transactionId) {
+      return { ok: false, status: 400, error: 'invalid_transaction', reason: 'missing_transaction_id' };
+    }
+    externalRef = String(tx.transactionId);
   } else if (platform === 'ios') {
     const sharedSecret = process.env.APPLE_SHARED_SECRET;
     if (!sharedSecret) {
       return { ok: false, status: 503, error: 'APPLE_SHARED_SECRET not configured' };
     }
-    const v = await verifyAppleReceipt({
+    const v = await verifyReceipt({
       receiptData: verificationData,
       sharedSecret,
       productId,
@@ -73,7 +107,7 @@ export async function verifyAndGrant({ uid, platform, productId, verificationDat
     return { ok: false, status: 400, error: 'invalid_platform' };
   }
 
-  const supabase = getSupabase();
+  const supabase = deps.supabase || getSupabase();
 
   // Replay protection (PRODUCTION_READINESS_PLAN §2.5): a re-sent receipt for
   // an already-granted store transaction must not double-grant. Same

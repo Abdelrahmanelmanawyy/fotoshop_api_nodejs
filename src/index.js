@@ -132,9 +132,11 @@ function checkEnv() {
       if (iapAndroidCreds) parts.push("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON or GOOGLE_PLAY_SERVICE_ACCOUNT_PATH");
       console.warn(`[ENV] IAP/Android: missing ${parts.join(", ")} — Android IAP verification will fail.`);
     }
-    const iapIos = ["APPLE_SHARED_SECRET"].filter((k) => !process.env[k]);
-    if (iapIos.length) {
-      console.warn(`[ENV] IAP/iOS: missing ${iapIos.join(", ")} — iOS IAP verification will fail.`);
+    if (!process.env.APPLE_APP_ID) {
+      console.warn("[ENV] IAP/iOS: missing APPLE_APP_ID — StoreKit 2 (JWS) purchases can only be verified in Sandbox; production iOS 15+ purchases will fail.");
+    }
+    if (!process.env.APPLE_SHARED_SECRET) {
+      console.warn("[ENV] IAP/iOS: missing APPLE_SHARED_SECRET — legacy base64 receipts (iOS < 15) will fail.");
     }
   }
 }
